@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 import logging
 from collections.abc import Callable
 from typing import Any, TypeVar
@@ -67,7 +68,17 @@ class Registrar:
         if mutates and self.settings.read_only:
             self.skipped.append(fn.__name__)
             return fn
-        self.mcp.add_tool(fn, title=title, annotations=annotations, meta=meta or None)
+        self.mcp.add_tool(
+            fn,
+            title=title,
+            # Normalise the docstring ourselves rather than letting the interpreter
+            # decide: CPython 3.13 strips common leading whitespace from `__doc__` at
+            # compile time and 3.11 does not, so on 3.11 every tool description
+            # reached the client indented — wasted tokens, and it reads as sloppy.
+            description=inspect.cleandoc(fn.__doc__ or "") or None,
+            annotations=annotations,
+            meta=meta or None,
+        )
         self.registered.append(fn.__name__)
         return fn
 

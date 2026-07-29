@@ -13,7 +13,7 @@ concurrency:
 jobs:
   test:
     # Windows first: it is the primary target, and the traps this project hit
-    # (zip entry separators, path quoting, process handling) are Windows-specific.
+    # (zip entry separators, path quoting, BOMs, process handling) are Windows-specific.
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -28,36 +28,41 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Set up Python ${{ matrix.python }}
-        run: uv python install ${{ matrix.python }}
-
+      # A project venv rather than `--system`: Ubuntu's system interpreter is
+      # externally managed and refuses installs. `uv run` then picks up .venv on both
+      # platforms without any activation dance.
       - name: Install
-        run: uv pip install --system -e ".[dev]"
+        run: |
+          uv venv --python ${{ matrix.python }}
+          uv pip install -e ".[dev]"
 
       - name: Lint
         run: |
-          ruff check .
-          ruff format --check .
+          uv run ruff check .
+          uv run ruff format --check .
 
       - name: Tests
-        run: pytest -q
+        run: uv run pytest -q
 
       - name: Cross-layer consistency
-        # Compares the Python tools, the add-on handlers and the privileged
-        # forwarding list, and validates every add-on script. Node is preinstalled
-        # on both runners, so the JavaScript syntax check runs too.
-        run: python tools/check_consistency.py
+        # Compares the Python tools, the add-on handlers and the privileged forwarding
+        # list, and validates every add-on script. Node is preinstalled on both
+        # runners, so the JavaScript syntax check runs too.
+        run: uv run python tools/check_consistency.py
 
       - name: Build the add-on package
-        run: python tools/build_xpi.py build
+        run: uv run python tools/build_xpi.py build
 
       - name: Tool docs are in sync with the code
+        # Catches a stale docs commit, and once caught a real bug: CPython 3.13 strips
+        # docstring indentation at compile time and 3.11 does not, so descriptions
+        # differed by interpreter until the server normalised them itself.
         run: |
-          python tools/gen_tool_reference.py
+          uv run python tools/gen_tool_reference.py
           git diff --exit-code -- README.md docs/TOOL-REFERENCE.md
 
       - name: Server starts and registers every toolset
-        run: python -m tbmcp tools --toolsets all
+        run: uv run python -m tbmcp tools --toolsets all
 
       - uses: actions/upload-artifact@v4
         if: matrix.os == 'windows-latest' && matrix.python == '3.13'

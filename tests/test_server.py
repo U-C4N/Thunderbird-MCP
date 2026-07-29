@@ -91,6 +91,23 @@ async def test_every_tool_has_a_description_and_title() -> None:
         assert getattr(tool, "title", None), f"{tool.name} has no title"
 
 
+async def test_descriptions_do_not_depend_on_the_interpreter() -> None:
+    """CPython 3.13 strips docstring indentation at compile time; 3.11 does not.
+
+    Left alone, that shipped indented descriptions to clients on 3.11 — wasted tokens
+    on every request, and the generated docs differed by interpreter. The server
+    normalises them itself, so `cleandoc` must be a no-op here on every version.
+    """
+    import inspect
+
+    for tool in await _all_tools().list_tools():
+        description = tool.description or ""
+        assert description == inspect.cleandoc(description), (
+            f"{tool.name} description is not normalised"
+        )
+        assert not description.startswith((" ", "\t")), f"{tool.name} description is indented"
+
+
 async def test_mutating_tools_ask_the_host_to_prompt() -> None:
     """Claude Code honours this even under bypassPermissions; Codex ignores it, which
     is why the confirm parameter exists as well."""
