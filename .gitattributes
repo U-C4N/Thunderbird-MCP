@@ -1,0 +1,18 @@
+# Normalise line endings so a Windows checkout and the Linux CI runner agree.
+# Without this, the CI step that regenerates the tool docs and then runs
+# `git diff --exit-code` can fail purely on CRLF vs LF.
+* text=auto eol=lf
+
+*.py    text eol=lf
+*.js    text eol=lf
+*.json  text eol=lf
+*.md    text eol=lf
+*.toml  text eol=lf
+*.yml   text eol=lf
+
+# PowerShell is happier with CRLF, and this file is Windows-only anyway.
+*.ps1   text eol=crlf
+
+*.xpi   binary
+*.png   binary
+*.ico   binary
