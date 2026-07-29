@@ -1,0 +1,74 @@
+{
+  "manifest_version": 2,
+  "name": "Thunderbird MCP Bridge",
+  "version": "0.2.0",
+  "description": "Lets a local MCP server drive this Thunderbird: mail, folders, contacts, calendar, filters and settings.",
+  "author": "thunderbird-mcp",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "bridge@thunderbird-mcp",
+      "strict_min_version": "128.0"
+    }
+  },
+  "background": {
+    "scripts": [
+      "background/log.js",
+      "background/registry.js",
+      "background/capabilities.js",
+      "background/handlers/accounts.js",
+      "background/handlers/compose.js",
+      "background/handlers/contacts.js",
+      "background/handlers/folders.js",
+      "background/handlers/messages.js",
+      "background/handlers/privileged.js",
+      "background/handlers/tags.js",
+      "background/events.js",
+      "background/transport.js",
+      "background/main.js"
+    ],
+    "persistent": true
+  },
+  "permissions": [
+    "accountsRead",
+    "accountsFolders",
+    "accountsIdentities",
+    "addressBooks",
+    "compose",
+    "compose.save",
+    "compose.send",
+    "messagesRead",
+    "messagesModify",
+    "messagesModifyPermanent",
+    "messagesMove",
+    "messagesDelete",
+    "messagesImport",
+    "messagesUpdate",
+    "messagesTags",
+    "messagesTagsList",
+    "messages.save",
+    "messages.tags",
+    "messengerSettings",
+    "sessions",
+    "tabs",
+    "storage"
+  ],
+  "optional_permissions": [
+    "messages.send"
+  ],
+  "experiment_apis": {
+    "tbx": {
+      "schema": "experiment/schema.json",
+      "parent": {
+        "scopes": [
+          "addon_parent"
+        ],
+        "paths": [
+          [
+            "tbx"
+          ]
+        ],
+        "script": "experiment/implementation.js"
+      }
+    }
+  }
+}

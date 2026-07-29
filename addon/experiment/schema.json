@@ -1,0 +1,87 @@
+[
+  {
+    "namespace": "tbx",
+    "description": "Privileged bridge helpers. Capability methods go through tbx.invoke so adding one needs no schema change.",
+    "functions": [
+      {
+        "name": "readBridgeFile",
+        "type": "function",
+        "async": true,
+        "description": "Read <profile>/tbmcp-bridge.json, or null when the daemon has not written it yet.",
+        "parameters": []
+      },
+      {
+        "name": "writeStatus",
+        "type": "function",
+        "async": true,
+        "description": "Write a startup report to <profile>/tbmcp-addon-status.json for tbmcp doctor.",
+        "parameters": [
+          { "name": "report", "type": "object", "additionalProperties": true }
+        ]
+      },
+      {
+        "name": "grantOptionalPermission",
+        "type": "function",
+        "async": true,
+        "description": "Grant one of this add-on's own optional_permissions without a user gesture.",
+        "parameters": [{ "name": "name", "type": "string" }]
+      },
+      {
+        "name": "keepAlive",
+        "type": "function",
+        "async": true,
+        "description": "Stop Thunderbird suspending the background page, which would tear down the bridge.",
+        "parameters": [{ "name": "enable", "type": "boolean", "optional": true }]
+      },
+      {
+        "name": "appInfo",
+        "type": "function",
+        "async": true,
+        "description": "Application name, version, buildID, locale and the profile/install directories.",
+        "parameters": []
+      },
+      {
+        "name": "availableModules",
+        "type": "function",
+        "async": true,
+        "description": "Which privileged capability modules loaded and which methods they expose.",
+        "parameters": []
+      },
+      {
+        "name": "globalIndexEnabled",
+        "type": "function",
+        "async": true,
+        "description": "Whether Thunderbird's global message indexer is enabled (full-text search depends on it).",
+        "parameters": []
+      },
+      {
+        "name": "writeFile",
+        "type": "function",
+        "async": true,
+        "description": "Write bytes into a directory on this machine, refusing path separators in the filename.",
+        "parameters": [
+          {
+            "name": "details",
+            "type": "object",
+            "properties": {
+              "directory": { "type": "string" },
+              "filename": { "type": "string" },
+              "base64": { "type": "string" },
+              "overwrite": { "type": "boolean", "optional": true }
+            }
+          }
+        ]
+      },
+      {
+        "name": "invoke",
+        "type": "function",
+        "async": true,
+        "description": "Call a privileged capability method by name, e.g. \"prefs.set\".",
+        "parameters": [
+          { "name": "method", "type": "string" },
+          { "name": "params", "type": "object", "optional": true, "additionalProperties": true }
+        ]
+      }
+    ]
+  }
+]

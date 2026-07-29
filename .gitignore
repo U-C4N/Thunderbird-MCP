@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Build output
+*.xpi
+!docs/**/*.xpi
+
+# Local scratch
+probe/explore.json
+probe/*.log
+*.local.json

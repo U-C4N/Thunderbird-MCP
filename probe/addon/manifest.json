@@ -1,0 +1,40 @@
+{
+  "manifest_version": 2,
+  "name": "Thunderbird MCP Capability Probe",
+  "version": "0.0.2",
+  "description": "Temporary probe that reports which privileged Thunderbird APIs and transports are reachable.",
+  "author": "thunderbird-mcp",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "probe@thunderbird-mcp.local",
+      "strict_min_version": "128.0"
+    }
+  },
+  "background": {
+    "scripts": ["background.js"],
+    "persistent": true
+  },
+  "permissions": [
+    "accountsRead",
+    "accountsIdentities",
+    "accountsFolders",
+    "messagesRead",
+    "messagesTags",
+    "addressBooks",
+    "compose",
+    "tabs",
+    "messengerSettings",
+    "storage",
+    "http://127.0.0.1/*"
+  ],
+  "experiment_apis": {
+    "tbx": {
+      "schema": "experiment/schema.json",
+      "parent": {
+        "scopes": ["addon_parent"],
+        "paths": [["tbx"]],
+        "script": "experiment/implementation.js"
+      }
+    }
+  }
+}

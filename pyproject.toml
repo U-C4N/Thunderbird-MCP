@@ -1,0 +1,84 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "thunderbird-mcp"
+version = "0.1.0"
+description = "MCP server that drives Thunderbird — mail, folders, contacts, calendar, filters, and settings"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+keywords = ["mcp", "thunderbird", "email", "model-context-protocol", "claude", "codex"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Communications :: Email",
+]
+dependencies = [
+  # 2.0 renamed FastMCP -> MCPServer and moved to the 2026-07-28 spec revision.
+  "mcp>=2.0.0,<3",
+  "websockets>=15,<17",
+  "tomlkit>=0.13",
+  "pydantic>=2.9",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "anyio>=4", "ruff>=0.9"]
+
+[project.scripts]
+# A real .exe shim on Windows: spawnable directly by Claude Code (Node) and
+# Codex (Rust) without `cmd /c`, which is the single biggest source of
+# "spawn ENOENT" / "request timed out" reports.
+thunderbird-mcp = "tbmcp.cli:main"
+tbmcp = "tbmcp.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/U-C4N/Thunderbird-MCP"
+Documentation = "https://github.com/U-C4N/Thunderbird-MCP/tree/main/docs"
+Issues = "https://github.com/U-C4N/Thunderbird-MCP/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tbmcp"]
+
+# The add-on source ships inside the wheel so `tbmcp install-addon` can build and
+# install the XPI without a checkout.
+[tool.hatch.build.targets.wheel.force-include]
+"addon" = "tbmcp/_addon"
+
+[tool.hatch.build.targets.sdist]
+include = ["src/tbmcp", "addon", "docs", "tests", "README.md", "LICENSE"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# The SDK is anyio-based, so async tests are driven by anyio's pytest plugin via
+# the `anyio_backend` fixture and `pytest.mark.anyio` — not pytest-asyncio.
+filterwarnings = [
+  # Catch Roots/Sampling/protocol-Logging usage in CI, not at runtime on a
+  # client that has already dropped support for them.
+  "error::mcp.MCPDeprecationWarning",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+ignore = [
+  "B008",   # Gate(...) in a default position is the documented tool-gating idiom
+  "E501",   # long lines are almost all prose in docstrings and error messages
+  "SIM105", # try/except/pass reads better than contextlib.suppress in short cleanup
+  "SIM112", # ProgramFiles(x86) is the real Windows variable name, casing included
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Test stubs and fixtures deliberately use shapes the linter dislikes.
+"tests/*" = ["RUF001", "RUF012"]
+# The probe is a throwaway diagnostic kept for reproducing the findings.
+"probe/*" = ["RUF001"]

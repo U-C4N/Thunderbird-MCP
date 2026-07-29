@@ -1,0 +1,24 @@
+[
+  {
+    "namespace": "tbx",
+    "description": "Privileged capability probe.",
+    "functions": [
+      {
+        "name": "probe",
+        "type": "function",
+        "async": true,
+        "parameters": []
+      },
+      {
+        "name": "writeReport",
+        "type": "function",
+        "async": true,
+        "description": "Write text into <profile>/<filename> using privileged file I/O.",
+        "parameters": [
+          { "name": "filename", "type": "string" },
+          { "name": "text", "type": "string" }
+        ]
+      }
+    ]
+  }
+]
