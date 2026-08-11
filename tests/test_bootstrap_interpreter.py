@@ -61,3 +61,39 @@ def test_nothing_usable_names_what_was_tried():
     with pytest.raises(BootstrapError) as caught:
         choose_interpreter(candidates=[SYSTEM, UV], run=run)
     assert "2" in str(caught.value)
+
+
+def test_json_parse_rejects_mere_substring_match():
+    """Echoing the load-test source (contains marker but no JSON) must fail."""
+
+    def run(argv):
+        # Returns 0 but output contains the marker string without valid JSON
+        return 0, 'echo "ok": true\n'
+
+    assert interpreter_ok("python", run=run) is False
+
+
+def test_launcher_resolves_versions():
+    """The py launcher is resolved to concrete paths, not passed as-is."""
+    from tbmcp.bootstrap import candidate_interpreters
+
+    resolved_313 = r"C:\Python313\python.exe"
+    resolved_312 = r"C:\Python312\python.exe"
+
+    def run(argv):
+        if len(argv) >= 2 and argv[0] == "py" and argv[1] == "-3.13":
+            return 0, f"{resolved_313}\n"
+        if len(argv) >= 2 and argv[0] == "py" and argv[1] == "-3.12":
+            return 0, f"{resolved_312}\n"
+        if len(argv) >= 2 and argv[0] == "py" and argv[1] == "-3.11":
+            return 1, "not found"  # Simulate missing version
+        # For interpreter_ok calls (load test)
+        return 0, json.dumps({"ok": True})
+
+    candidates = candidate_interpreters(run=run)
+    # Should include resolved paths, not the "py -X.Y" strings
+    assert resolved_313 in candidates
+    assert resolved_312 in candidates
+    assert "py -3.13" not in candidates
+    assert "py -3.12" not in candidates
+    assert "py -3.11" not in candidates

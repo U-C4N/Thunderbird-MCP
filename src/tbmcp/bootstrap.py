@@ -250,14 +250,22 @@ def interpreter_ok(python: str, *, run: Runner = run_capture) -> bool:
     other reports intent rather than outcome. Loading the modules does not.
     """
     status, output = run([python, "-c", _LOAD_TEST])
-    return status == 0 and '"ok": true' in output.lower()
+    if status != 0:
+        return False
+    return _json_field(output, "ok") is True
 
 
-def candidate_interpreters() -> list[str]:
+def candidate_interpreters(*, run: Runner = run_capture) -> list[str]:
     candidates = [sys.executable]
     if os.name == "nt":
-        for minor in ("3.13", "3.12", "3.11"):
-            candidates.append(f"py -{minor}")
+        py_launcher = shutil.which("py")
+        if py_launcher:
+            for minor in ("3.13", "3.12", "3.11"):
+                status, output = run([py_launcher, f"-{minor}", "-c", "import sys; print(sys.executable)"])
+                if status == 0:
+                    resolved = output.strip().split('\n')[-1]
+                    if resolved:
+                        candidates.append(resolved)
         for minor in ("314", "313", "312", "311"):
             candidates.append(rf"C:\Python{minor}\python.exe")
     for name in ("python3.13", "python3.12", "python3.11", "python3", "python"):
@@ -285,7 +293,7 @@ def choose_interpreter(
         raise BootstrapError(
             f"{explicit} cannot load sqlite3/ssl/ctypes. Pick another with --python."
         )
-    pool = list(candidates) if candidates is not None else candidate_interpreters()
+    pool = list(candidates) if candidates is not None else candidate_interpreters(run=run)
     for candidate in pool:
         if interpreter_ok(candidate, run=run):
             return candidate
