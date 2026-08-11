@@ -717,20 +717,27 @@ def installed_clients() -> list[str]:
 
     "Present" is judged from the same locations the writers themselves use, on the
     theory that whatever the writer would touch is also good evidence the client
-    exists — no new paths are invented here. `claude-code` and `codex` are judged by
-    their CLI being on PATH rather than by their config file: both write that file
-    lazily, on first `add`, so a fresh install with the CLI present but never yet
-    used would otherwise read as absent. Every other client here is a GUI app whose
-    installer is what creates its config file or directory, so that file or its
-    parent directory existing is the best signal available without something
-    OS-specific like querying an app registry.
+    exists — no new paths are invented here. `claude-code`, `codex`, and `vscode`
+    each have a CLI that their own writer treats as the *primary* way to register
+    (`_claude_code`, `_codex`, and `_vscode` all try `claude`/`codex`/`code` before
+    ever touching a config file), so detection trusts that same CLI being on PATH:
+    all three write their config lazily, on first use, and a fresh install with the
+    CLI present but never yet used would otherwise read as absent. Every other
+    client here is a GUI app whose writer only ever touches a config path, with no
+    CLI fallback to mirror — for those, that file or its parent directory existing
+    is the best signal available without something OS-specific like querying an app
+    registry.
     """
     checks: dict[str, bool] = {
         "claude-code": shutil.which("claude") is not None or _claude_code_path().exists(),
         "codex": shutil.which("codex") is not None or _codex_home().exists(),
         "claude-desktop": _claude_desktop_path().exists() or _claude_desktop_path().parent.exists(),
         "cursor": _cursor_path().exists() or _cursor_path().parent.exists(),
-        "vscode": _vscode_user_path().exists() or _vscode_user_path().parent.exists(),
+        "vscode": (
+            shutil.which("code") is not None
+            or _vscode_user_path().exists()
+            or _vscode_user_path().parent.exists()
+        ),
         "gemini": _gemini_path().exists() or _gemini_path().parent.exists(),
         "zed": _zed_path().exists() or _zed_path().parent.exists(),
     }

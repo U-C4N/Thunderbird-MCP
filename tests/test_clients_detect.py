@@ -56,6 +56,14 @@ def test_codex_config_dir_counts_even_without_the_cli_on_path(monkeypatch, tmp_p
     assert clients.installed_clients() == ["codex"]
 
 
+def test_vscode_cli_on_path_counts_even_without_a_config_file(monkeypatch):
+    """`_vscode` tries `code --add-mcp` before ever touching the file — same as claude/codex."""
+    monkeypatch.setattr(
+        clients.shutil, "which", lambda name: "/usr/bin/code" if name == "code" else None
+    )
+    assert clients.installed_clients() == ["vscode"]
+
+
 def test_gui_client_config_file_present_is_the_signal(monkeypatch, tmp_path):
     path = tmp_path / "cursor" / "mcp.json"
     path.parent.mkdir(parents=True)

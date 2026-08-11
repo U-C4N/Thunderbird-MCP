@@ -12,6 +12,7 @@ from tbmcp.bootstrap import (
     Options,
     Report,
     Step,
+    _detected_clients,
     _step_addon,
     _step_clients,
     _step_imports,
@@ -224,6 +225,34 @@ def test_clients_step_shells_out_with_requested_clients(tmp_path):
 
 
 # ------------------------------------------------------------ auto-detected clients
+
+
+def test_detected_clients_returns_empty_on_nonzero_exit():
+    def run(argv):
+        return 1, "detect-clients crashed"
+
+    assert _detected_clients("python", run) == ()
+
+
+def test_detected_clients_returns_empty_on_empty_output():
+    def run(argv):
+        return 0, ""
+
+    assert _detected_clients("python", run) == ()
+
+
+def test_detected_clients_returns_empty_on_malformed_json():
+    def run(argv):
+        return 0, "[this is not json"
+
+    assert _detected_clients("python", run) == ()
+
+
+def test_detected_clients_skips_junk_lines_before_the_json():
+    def run(argv):
+        return 0, "warning: something noisy\nDeprecationWarning: whatever\n[\"zed\"]"
+
+    assert _detected_clients("python", run) == ("zed",)
 
 
 def test_clients_step_detects_and_registers_when_none_requested(tmp_path):
