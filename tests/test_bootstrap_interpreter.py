@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -74,8 +75,18 @@ def test_json_parse_rejects_mere_substring_match():
 
 
 def test_launcher_resolves_versions(monkeypatch):
-    """The py launcher is resolved to concrete paths, not passed as-is."""
+    """The py launcher is resolved to concrete paths, not passed as-is.
+
+    The launcher block only runs `if os.name == "nt":` (`bootstrap.py`), so this test
+    has to force that branch rather than assume it — otherwise it only ever runs on
+    Windows and CI's Ubuntu/macOS jobs never exercise this code at all (silent, not
+    even a skip). Patching `bootstrap.os.name` keeps the assertions honest on every
+    platform instead of hiding them behind a `skipif`.
+    """
+    import tbmcp.bootstrap as bootstrap_module
     from tbmcp.bootstrap import candidate_interpreters
+
+    monkeypatch.setattr(bootstrap_module.os, "name", "nt")
 
     # Use distinctive paths that won't appear from hardcoded C:\PythonXXX fallback.
     sentinel_launcher = r"C:\WINDOWS\py.EXE"

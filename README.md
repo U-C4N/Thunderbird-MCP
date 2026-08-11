@@ -100,9 +100,10 @@ Thunderbird
 Bridge
   daemon                     pid 31120
   connected                  True
-  add-on version (live)      0.2.0
+  add-on version (live)      1.2.0
   privileged half            True
   app                        Thunderbird 153.0.2
+  tb_status tool call        connected
 
 Tools
   toolsets                   mail,folders,compose,search,admin
@@ -510,7 +511,7 @@ error console with a `[tbmcp]` prefix, and `tb_console` returns those lines as a
 ```bash
 uv venv && uv pip install -e ".[dev]"
 
-pytest                                  # 142 tests, no Thunderbird needed
+pytest                                  # 177 tests, no Thunderbird needed
 ruff check . && ruff format --check .
 python tools/check_consistency.py       # do all three layers still agree?
 python tools/build_xpi.py build         # build the add-on package

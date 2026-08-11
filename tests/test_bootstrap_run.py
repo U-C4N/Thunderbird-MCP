@@ -4,18 +4,18 @@
 from __future__ import annotations
 
 import json
+import pathlib
 import sys
 
 import pytest
 
 from tbmcp.bootstrap import (
     Options,
-    Report,
-    Step,
     _detected_clients,
     _step_addon,
     _step_clients,
     _step_imports,
+    _step_venv,
     _step_verify,
     bootstrap,
 )
@@ -100,8 +100,10 @@ def test_reports_every_step_in_order(tmp_path):
     recorder = Recorder(_venv_python_path(tmp_path / "venv"))
     report = bootstrap(Options(venv=tmp_path / "venv", dry_run=True), run=recorder.run)
     assert [step.name for step in report.steps] == STEPS
-    assert report.ok is True
-    assert report.next_command is None
+    # A dry run establishes nothing — no step actually ran `verify` — so it must
+    # never read the same as a real success. See test_dry_run_is_never_reported_ok.
+    assert report.ok is False
+    assert report.next_command is not None
 
 
 def test_dry_run_creates_nothing(tmp_path):
@@ -121,6 +123,33 @@ def test_failure_stops_and_names_the_next_command(tmp_path):
     assert len(report.steps) == 1
 
 
+def test_venv_step_fails_when_the_created_interpreter_cannot_load_extensions(tmp_path):
+    """I8: `python -m venv` exiting 0 says the tool ran, not that the interpreter it
+    produced can load `sqlite3`/`ssl`/`ctypes` — the same gap `interpreter_ok` exists
+    to close for candidate selection. A reused venv was already load-tested; a freshly
+    created one must be too, not trusted on a bare exit code.
+    """
+    venv_dir = tmp_path / "venv"
+    python_path = _venv_python_path(venv_dir)
+
+    def run(argv):
+        argv = list(argv)
+        if "-m" in argv and "venv" in argv:
+            python_path.parent.mkdir(parents=True, exist_ok=True)
+            python_path.write_text("not a real interpreter", encoding="utf-8")
+            return 0, ""
+        if "-c" in argv:
+            # The load test on the interpreter this "created" — deliberately unhealthy.
+            return 1, "ImportError: DLL load failed while importing _sqlite3"
+        raise AssertionError(f"unexpected call: {argv}")
+
+    state = {"venv": venv_dir, "interpreter": "python", "launcher": None}
+    status, detail = _step_venv(Options(dry_run=False), state, run)
+
+    assert status == "failed"
+    assert "sqlite3" in detail or "ssl" in detail or "ctypes" in detail
+
+
 def test_skip_addon_marks_it_skipped(tmp_path):
     recorder = Recorder(_venv_python_path(tmp_path / "venv"))
     report = bootstrap(
@@ -134,36 +163,97 @@ def test_json_is_machine_readable(tmp_path):
     recorder = Recorder(_venv_python_path(tmp_path / "venv"))
     report = bootstrap(Options(venv=tmp_path / "venv", dry_run=True), run=recorder.run)
     payload = json.loads(report.to_json())
-    assert payload["ok"] is True
+    assert payload["ok"] is False  # dry run: see test_dry_run_is_never_reported_ok
     assert payload["version"] == "1.2.0"
     assert [s["name"] for s in payload["steps"]] == STEPS
     assert set(payload) == {"ok", "version", "launcher", "steps", "next_command"}
+
+
+def test_dry_run_is_never_reported_ok(tmp_path):
+    """I1: a dry run must not be byte-shaped identically to a real success in the
+    five-key JSON contract an agent parses. `ok` means "verified working"; a dry run
+    never runs `verify` (it is always `skipped`), so `ok` must never be `true`,
+    no matter how cleanly every individual step reads.
+    """
+    recorder = Recorder(_venv_python_path(tmp_path / "venv"))
+    report = bootstrap(Options(venv=tmp_path / "venv", dry_run=True), run=recorder.run)
+    assert report.ok is False
+    assert all(step.status in ("ok", "skipped") for step in report.steps)
+    statuses = {step.name: step.status for step in report.steps}
+    assert statuses["verify"] == "skipped"
+    # The next command must be something that actually does the install — not a
+    # remedy for a failure that never happened.
+    assert report.next_command.startswith("python bootstrap.py")
+    assert "--dry-run" not in report.next_command
+
+
+def test_real_run_reaching_the_end_is_reported_ok(tmp_path):
+    """The flip side of the above: a run that is *not* a dry run, and that hits no
+    `failed` step, must still be able to report `ok: true` — the dry-run fix must
+    not make every run unconditionally `ok: false`.
+    """
+
+    def run(argv):
+        argv = list(argv)
+        if argv[1:] == ["-m", "tbmcp", "detect-clients"]:
+            return 0, json.dumps([])
+        if "-c" in argv:
+            source = argv[argv.index("-c") + 1]
+            if "sqlite3" in source:
+                return 0, json.dumps({"ok": True, "version": "3.14"})
+            if "__import__" in source:
+                return 0, json.dumps({"ok": True})
+        return 0, json.dumps({"ok": True})
+
+    report = bootstrap(
+        Options(venv=tmp_path / "venv", dry_run=False, skip_addon=True), run=run
+    )
+    assert report.ok is True
+    assert report.next_command is None
 
 
 # --------------------------------------------------------------- deferred-import status
 
 
 def test_blocked_import_is_reported_as_skipped_not_ok_or_failed(tmp_path):
-    """A blocked import must never read as `ok` — that is the exact lie this exists to catch."""
+    """A blocked import must never read as `ok` — that is the exact lie this exists to catch.
+
+    Exercises `_step_imports` directly with `dry_run=False`, so it actually probes
+    (see `test_imports_step_does_not_probe_under_dry_run` below for the dry-run
+    case, where nothing is probed at all).
+    """
+    venv_python = str(tmp_path / "venv" / "Scripts" / "python.exe")
 
     def run(argv):
         argv = list(argv)
         if "-c" in argv:
             source = argv[argv.index("-c") + 1]
-            if "sqlite3" in source:
-                return 0, json.dumps({"ok": True, "version": "3.14"})
             if "__import__" in source:
                 return 0, json.dumps(
                     {"ok": False, "name": "somepkg", "path": None, "message": "boom"}
                 )
         return 0, ""
 
-    report = bootstrap(Options(venv=tmp_path / "venv", dry_run=True), run=run)
-    statuses = {step.name: step.status for step in report.steps}
-    assert statuses["imports"] == "skipped"
-    assert statuses["imports"] != "ok"
-    assert statuses["imports"] != "failed"
-    assert report.ok is True  # binaries had nothing to repair against a dry run; run continues
+    status, detail = _step_imports(Options(dry_run=False), {"venv_python": venv_python}, run)
+    assert status == "skipped"
+    assert status != "ok"
+    assert status != "failed"
+    assert "somepkg" in detail
+
+
+def test_imports_step_does_not_probe_under_dry_run(tmp_path):
+    """I3: nothing was installed under `--dry-run`, so nothing should be probed —
+    probing a venv that was never created can only report a failure that has
+    nothing to do with the actual package.
+    """
+    venv_python = str(tmp_path / "venv" / "Scripts" / "python.exe")
+
+    def run(argv):
+        raise AssertionError(f"--dry-run must not probe anything: {argv}")
+
+    status, detail = _step_imports(Options(dry_run=True), {"venv_python": venv_python}, run)
+    assert status == "skipped"
+    assert "venv" in detail.lower()
 
 
 # ------------------------------------------------------- interpreter identity, not just argv shape
@@ -187,7 +277,7 @@ def test_imports_step_probes_the_venvs_python_not_the_system_one(tmp_path):
         return 0, json.dumps({"ok": True})
 
     state = {"venv_python": venv_py, "interpreter": system_py}
-    status, _detail = _step_imports(Options(dry_run=True), state, run)
+    status, _detail = _step_imports(Options(dry_run=False), state, run)
     assert status == "ok"
 
 
@@ -227,23 +317,35 @@ def test_clients_step_shells_out_with_requested_clients(tmp_path):
 # ------------------------------------------------------------ auto-detected clients
 
 
-def test_detected_clients_returns_empty_on_nonzero_exit():
+def test_detected_clients_returns_none_on_nonzero_exit():
+    """`None` — could not run — not `()` — ran and found nothing. See I2: conflating
+    the two let `_step_clients` claim a fact about the machine it never checked."""
+
     def run(argv):
         return 1, "detect-clients crashed"
 
-    assert _detected_clients("python", run) == ()
+    assert _detected_clients("python", run) is None
 
 
-def test_detected_clients_returns_empty_on_empty_output():
+def test_detected_clients_returns_none_on_empty_output():
     def run(argv):
         return 0, ""
 
-    assert _detected_clients("python", run) == ()
+    assert _detected_clients("python", run) is None
 
 
-def test_detected_clients_returns_empty_on_malformed_json():
+def test_detected_clients_returns_none_on_malformed_json():
     def run(argv):
         return 0, "[this is not json"
+
+    assert _detected_clients("python", run) is None
+
+
+def test_detected_clients_returns_empty_tuple_on_a_genuine_empty_list():
+    """The one case that really is "ran cleanly, found nothing": a well-formed `[]`."""
+
+    def run(argv):
+        return 0, json.dumps([])
 
     assert _detected_clients("python", run) == ()
 
@@ -295,6 +397,10 @@ def test_clients_step_skips_not_ok_when_nothing_detected(tmp_path):
 
 
 def test_clients_step_dry_run_may_detect_but_never_registers(tmp_path):
+    """I1: a dry run that detected something real still established nothing —
+    `skipped`, not `ok`, the same status the project already uses everywhere else
+    for a deferred outcome.
+    """
     calls: list[list[str]] = []
 
     def run(argv):
@@ -307,9 +413,28 @@ def test_clients_step_dry_run_may_detect_but_never_registers(tmp_path):
     venv_python = str(tmp_path / "venv" / "Scripts" / "python.exe")
     status, detail = _step_clients(Options(dry_run=True), {"venv_python": venv_python}, run)
 
-    assert status == "ok"
+    assert status == "skipped"
+    assert status != "ok"
     assert "claude-code" in detail
     assert calls == [[venv_python, "-m", "tbmcp", "detect-clients"]]
+
+
+def test_clients_step_says_it_could_not_check_when_detection_cannot_run(tmp_path):
+    """I2: when detection cannot run at all (a nonexistent venv python under
+    `--dry-run`, before any venv exists, shells out to `FileNotFoundError` and a
+    non-zero exit), the step must say that detection did not run — never assert a
+    fact about the machine ("no MCP clients detected") that it never checked.
+    """
+
+    def run(argv):
+        return 127, "FileNotFoundError: no such file"
+
+    venv_python = str(tmp_path / "venv" / "Scripts" / "python.exe")
+    status, detail = _step_clients(Options(dry_run=True), {"venv_python": venv_python}, run)
+
+    assert status == "skipped"
+    assert "no mcp clients detected" not in detail.lower()
+    assert "could not" in detail.lower()
 
 
 def test_clients_step_with_explicit_clients_skips_detection_entirely(tmp_path):
@@ -340,3 +465,137 @@ def test_verify_step_shells_out_to_doctor_json(tmp_path):
 
     assert status == "ok"
     assert calls == [[venv_python, "-m", "tbmcp", "doctor", "--json"]]
+
+
+def test_verify_step_fails_when_doctor_exits_zero_but_reports_not_ok(tmp_path):
+    """C1: `doctor --json` exiting 0 must not be enough on its own. This is exactly
+    the bug that let `verify` certify a server that never worked — `doctor --json`
+    used to always exit 0 regardless of what it found, and `_step_verify` trusted
+    only the exit code.
+    """
+
+    def run(argv):
+        # A real subprocess exiting 0 while its own report says the chain is broken —
+        # the state the pre-fix `cmd_doctor --json` always produced.
+        return 0, json.dumps({"ok": False, "bridge": {"connected": False}})
+
+    venv_python = str(tmp_path / "venv" / "Scripts" / "python.exe")
+    status, detail = _step_verify(Options(dry_run=False), {"venv_python": venv_python}, run)
+
+    assert status == "failed"
+    assert status != "ok"
+
+
+def test_verify_step_fails_when_doctor_output_is_not_json(tmp_path):
+    def run(argv):
+        return 0, "not json at all"
+
+    venv_python = str(tmp_path / "venv" / "Scripts" / "python.exe")
+    status, _detail = _step_verify(Options(dry_run=False), {"venv_python": venv_python}, run)
+    assert status == "failed"
+
+
+# --------------------------------------------------------------------- next_command
+
+
+def test_remedy_for_binaries_names_a_real_distribution_and_venv_pip():
+    """C3: the remedy must name the resolved distribution (never the raw module),
+    a real version bound (never a `<older>` placeholder), and the venv's own pip
+    (never bare `pip`, which is not on PATH here).
+    """
+    from tbmcp.bootstrap import ImportFailure, _remedy
+
+    venv_python = r"C:\venv\Scripts\python.exe"
+    state = {
+        "venv": pathlib.Path(r"C:\venv"),
+        "venv_python": venv_python,
+        "binaries_failure": ImportFailure(
+            module="_cffi_backend", path=None, message="blocked", dist="cffi", floor="2.1.0"
+        ),
+    }
+    command = _remedy("binaries", "detail", Options(), state)
+
+    assert "cffi" in command
+    assert "_cffi_backend" not in command
+    assert "<older>" not in command
+    assert venv_python in command
+    assert not command.startswith("pip ")
+
+
+def test_remedy_for_binaries_without_a_resolved_distribution_does_not_fabricate_one():
+    """When no distribution could be resolved at all (an empty-module failure),
+    the remedy must not invent a fake `target==<older>` command — there is nothing
+    real to name."""
+    from tbmcp.bootstrap import ImportFailure, _remedy
+
+    venv_python = r"C:\venv\Scripts\python.exe"
+    state = {
+        "venv": pathlib.Path(r"C:\venv"),
+        "venv_python": venv_python,
+        "binaries_failure": ImportFailure(module="", path=None, message="probe exited 1: "),
+    }
+    command = _remedy("binaries", "detail", Options(), state)
+
+    assert "<older>" not in command
+    assert "target" not in command
+    assert venv_python in command
+
+
+def test_remedy_for_addon_clients_verify_uses_the_venv_python_not_bare_tbmcp():
+    """C4: the fall-through default used to be the bare string `tbmcp doctor` —
+    unrunnable, since the bootstrap venv is never added to PATH. It must name the
+    venv's own python explicitly, same as the fix already applied to `venv`/`install`.
+    """
+    from tbmcp.bootstrap import _remedy
+
+    venv_python = r"C:\venv\Scripts\python.exe"
+    state = {"venv": pathlib.Path(r"C:\venv"), "venv_python": venv_python}
+    for step_name in ("addon", "clients", "verify"):
+        command = _remedy(step_name, "some failure detail", Options(), state)
+        assert command.startswith('"' + venv_python), command
+        assert not command.startswith("tbmcp ")
+
+
+@pytest.mark.parametrize(
+    "step_name", ["interpreter", "venv", "install", "binaries", "addon", "clients", "verify"]
+)
+def test_no_remedy_ever_names_a_bare_tbmcp_or_pip(step_name):
+    """The property the review asked for directly: whatever failed, the single next
+    command must never start with a bare `tbmcp` or bare `pip` — neither is on PATH
+    in the state that emits a `next_command` at all."""
+    from tbmcp.bootstrap import ImportFailure, _remedy
+
+    venv_python = r"C:\venv\Scripts\python.exe"
+    state = {
+        "venv": pathlib.Path(r"C:\venv"),
+        "interpreter": r"C:\Python314\python.exe",
+        "venv_python": venv_python,
+        "binaries_failure": ImportFailure(
+            module="_cffi_backend", path=None, message="x", dist="cffi", floor="1.0.0"
+        ),
+    }
+    command = _remedy(step_name, "some failure detail", Options(), state)
+    assert not command.startswith("tbmcp ")
+    assert not command.startswith("pip ")
+    assert command != "tbmcp doctor"
+
+
+# ------------------------------------------------------------------- I5: no unhandled crash
+
+
+def test_a_steps_own_bug_still_produces_valid_json_not_a_traceback():
+    """I5: a step raising something other than `BootstrapError` (an `OSError`,
+    `KeyError`, whatever) used to escape `bootstrap()` entirely, so `--json` gave no
+    JSON at all — the one output contract a calling agent depends on.
+    """
+
+    def broken_run(argv):
+        raise KeyError("boom")
+
+    report = bootstrap(Options(venv=pathlib.Path(r"C:\venv"), dry_run=False), run=broken_run)
+    assert report.ok is False
+    assert report.steps[0].status == "failed"
+    assert "KeyError" in report.steps[0].detail
+    # Must still serialise: this is the actual contract check.
+    payload = json.loads(report.to_json())
+    assert set(payload) == {"ok", "version", "launcher", "steps", "next_command"}

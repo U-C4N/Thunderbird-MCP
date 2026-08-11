@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import pathlib
 import subprocess
@@ -43,6 +44,30 @@ def test_module_imports_without_the_package_on_the_path(tmp_path):
 def test_root_shim_exists_and_delegates():
     text = (ROOT / "bootstrap.py").read_text(encoding="utf-8")
     assert "tbmcp" in text and "bootstrap" in text
+
+
+def test_root_shim_actually_runs_and_produces_the_five_key_contract(tmp_path):
+    """I6: the previous test only read the shim's *text* — delete its entire body
+    and it would still pass, since both words also appear in the docstring alone.
+    `python bootstrap.py`, the first command in the README and the one that breaks
+    the chicken-and-egg (nothing is installed yet), was not exercised by any test.
+    This actually runs it, out of a clean cwd, and checks the real output contract.
+    """
+    env = dict(os.environ)
+    env["PYTHONPATH"] = ""
+    done = subprocess.run(
+        [sys.executable, "-I", "-S", str(ROOT / "bootstrap.py"), "--dry-run", "--json"],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        env=env,
+        timeout=60,
+    )
+    assert done.returncode in (0, 1), done.stderr
+    payload = json.loads(done.stdout)
+    assert set(payload) == {"ok", "version", "launcher", "steps", "next_command"}
+    assert payload["version"] == "1.2.0"
+    assert payload["steps"]  # ran the real step sequence, not a stub
 
 
 def test_cli_exposes_the_subcommand():

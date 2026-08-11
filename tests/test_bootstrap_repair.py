@@ -55,11 +55,24 @@ def test_downgrades_until_the_import_works():
 
 
 def test_gives_up_and_names_the_module():
-    env = FakeEnv(unblocks_below=None)
-    repairs, failure = repair_imports("python", run=env.run, max_attempts=3)
+    """`max_attempts=3` must be what stops the walk, not the fake running out of
+    releases to offer. The default `FakeEnv` only carries three versions, so pip
+    exhausts its own releases at the same point the bound would bite anyway — raise
+    `max_attempts` to 99 against that fixture and this test still passes, which
+    means it was never defending the bound at all. Six versions and an exact count
+    close that gap: with `unblocks_below=None` every one of the first three
+    downgrades succeeds, so only the bound — not a `pip install` failure — can be
+    why a fourth is never attempted.
+    """
+    env = FakeEnv(
+        unblocks_below=None,
+        versions=("2.5.0", "2.4.0", "2.3.0", "2.2.0", "2.1.0", "2.0.0"),
+    )
+    _repairs, failure = repair_imports("python", run=env.run, max_attempts=3)
     assert failure is not None
     assert failure.module == "_cffi_backend"
-    assert len(env.installs) <= 3
+    assert failure.dist == "cffi"
+    assert len(env.installs) == 3
 
 
 def test_healthy_environment_is_untouched():

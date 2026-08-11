@@ -103,11 +103,26 @@ def cmd_install_addon(args: argparse.Namespace) -> int:
     return 0
 
 
+def _doctor_ok(report: dict) -> bool:
+    """Whether `doctor` actually established a working chain — not just ran.
+
+    Both the direct daemon status *and* the `tb_status` tool call (routed through the
+    real MCP tool-calling machinery, the same path a client uses) have to say
+    `connected`. Checking only one would let the other silently regress unnoticed.
+    """
+    bridge_state = report.get("bridge")
+    tool_call = report.get("tbStatusCall")
+    bridge_ok = isinstance(bridge_state, dict) and bool(bridge_state.get("connected"))
+    tool_ok = isinstance(tool_call, dict) and bool(tool_call.get("connected"))
+    return bridge_ok and tool_ok
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     from . import addon_install
-    from .bridge import Bridge
+    from .bridge import Bridge, set_shared_bridge
     from .ipc import DaemonInfo
     from .profile import ProfileSnapshot, find_profile, list_profiles
+    from .server import build_server
 
     settings = _settings_from_args(args)
     report: dict[str, object] = {"python": sys.version.split()[0], "executable": sys.executable}
@@ -153,7 +168,22 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 report["bridge"] = await bridge.status()
             except Exception:
                 report["bridge"] = {"error": str(exc)}
+
+        # `report["bridge"]` above talks to the daemon directly. This instead goes
+        # through `MCPServer.call_tool`, the exact dispatch a real client triggers —
+        # tool lookup, annotations, the `Context` object — so `doctor` (and the
+        # bootstrap `verify` step that shells out to it) proves the whole chain
+        # answers, not merely that `Bridge.status()` can format a reply. Reuses the
+        # connection already established above; does not spawn a second daemon.
+        set_shared_bridge(bridge)
+        try:
+            mcp = build_server(settings)
+            result = await mcp.call_tool("tb_status", {})
+            report["tbStatusCall"] = result.structured_content
+        except Exception as exc:
+            report["tbStatusCall"] = {"error": f"{type(exc).__name__}: {exc}"}
         finally:
+            set_shared_bridge(None)
             await bridge.close()
 
     asyncio.run(probe())
@@ -165,13 +195,14 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         "sendMode": settings.send_mode,
     }
 
+    ok = _doctor_ok(report)
+    report["ok"] = ok
+
     if args.json:
         print(json.dumps(report, indent=2, default=str))
-        return 0
+        return 0 if ok else 1
 
     _print_doctor(report)
-    bridge_state = report.get("bridge")
-    ok = isinstance(bridge_state, dict) and bridge_state.get("connected")
     return 0 if ok else 1
 
 
@@ -221,6 +252,12 @@ def _print_doctor(report: dict) -> None:
             line("privileged half", tb.get("experiment"))
             app = tb.get("app") or {}
             line("app", f"{app.get('name')} {app.get('version')}")
+
+    tool_call = report.get("tbStatusCall") or {}
+    if tool_call.get("error"):
+        line("tb_status tool call", f"ERROR: {tool_call['error']}")
+    else:
+        line("tb_status tool call", "connected" if tool_call.get("connected") else "not connected")
 
     print("\nTools")
     tools = report.get("toolsets") or {}
