@@ -4,10 +4,21 @@
 from __future__ import annotations
 
 import json
+import sys
 
 import pytest
 
-from tbmcp.bootstrap import Options, Report, Step, _step_addon, _step_clients, _step_verify, bootstrap
+from tbmcp.bootstrap import (
+    Options,
+    Report,
+    Step,
+    _step_addon,
+    _step_clients,
+    _step_imports,
+    _step_verify,
+    bootstrap,
+)
+from tbmcp.bootstrap import venv_python as _venv_python_path
 
 STEPS = ["interpreter", "venv", "install", "imports", "binaries", "launcher",
          "addon", "clients", "verify"]
@@ -32,28 +43,53 @@ class Recorder:
     A call this fake was not built to answer raises rather than falling through to a
     success-shaped `(0, "")`: a step invoking the wrong interpreter, or shelling out
     with the wrong argv, must show up as a test failure, not disappear into a silent
-    no-op that happens to look fine.
+    no-op that happens to look fine. That includes `argv[0]`, not just the `-c`
+    source — matching only on source content would let a step probe a wrong or
+    nonexistent interpreter path and still see a success-shaped payload back, which is
+    exactly the failure mode this fake exists to catch. The `interpreter` step tries
+    candidate interpreters (here, just `sys.executable`, since the module's own
+    interpreter-discovery is neutralised by `_no_stray_interpreters`); `imports` and
+    `binaries` must always be called with the venv's python, never the system one.
     """
 
-    def __init__(self):
+    def __init__(self, venv_python, system_python=None):
         self.calls: list[list[str]] = []
+        self.venv_python = str(venv_python)
+        self.system_python = str(system_python or sys.executable)
 
     def run(self, argv):
         argv = list(argv)
         self.calls.append(argv)
+        interpreter = argv[0] if argv else None
         if "-c" in argv:
             source = argv[argv.index("-c") + 1]
             if "sqlite3" in source:
+                if interpreter not in (self.system_python, self.venv_python):
+                    raise AssertionError(
+                        f"interpreter_ok probed {interpreter!r}, expected the chosen "
+                        f"interpreter {self.system_python!r} or the venv's python "
+                        f"{self.venv_python!r}"
+                    )
                 return 0, json.dumps({"ok": True, "version": "3.14"})
             if "__import__" in source:
+                if interpreter != self.venv_python:
+                    raise AssertionError(
+                        f"import probe used {interpreter!r}, expected the venv's "
+                        f"python {self.venv_python!r}"
+                    )
                 return 0, json.dumps({"ok": True})
             if "packages_distributions" in source:
+                if interpreter != self.venv_python:
+                    raise AssertionError(
+                        f"distribution lookup used {interpreter!r}, expected the "
+                        f"venv's python {self.venv_python!r}"
+                    )
                 return 0, json.dumps({"dist": None})
         raise AssertionError(f"Recorder was not built to answer this call: {argv}")
 
 
 def test_reports_every_step_in_order(tmp_path):
-    recorder = Recorder()
+    recorder = Recorder(_venv_python_path(tmp_path / "venv"))
     report = bootstrap(Options(venv=tmp_path / "venv", dry_run=True), run=recorder.run)
     assert [step.name for step in report.steps] == STEPS
     assert report.ok is True
@@ -62,7 +98,7 @@ def test_reports_every_step_in_order(tmp_path):
 
 def test_dry_run_creates_nothing(tmp_path):
     venv = tmp_path / "venv"
-    bootstrap(Options(venv=venv, dry_run=True), run=Recorder().run)
+    bootstrap(Options(venv=venv, dry_run=True), run=Recorder(_venv_python_path(venv)).run)
     assert not venv.exists()
 
 
@@ -78,15 +114,17 @@ def test_failure_stops_and_names_the_next_command(tmp_path):
 
 
 def test_skip_addon_marks_it_skipped(tmp_path):
+    recorder = Recorder(_venv_python_path(tmp_path / "venv"))
     report = bootstrap(
-        Options(venv=tmp_path / "venv", dry_run=True, skip_addon=True), run=Recorder().run
+        Options(venv=tmp_path / "venv", dry_run=True, skip_addon=True), run=recorder.run
     )
     statuses = {step.name: step.status for step in report.steps}
     assert statuses["addon"] == "skipped"
 
 
 def test_json_is_machine_readable(tmp_path):
-    report = bootstrap(Options(venv=tmp_path / "venv", dry_run=True), run=Recorder().run)
+    recorder = Recorder(_venv_python_path(tmp_path / "venv"))
+    report = bootstrap(Options(venv=tmp_path / "venv", dry_run=True), run=recorder.run)
     payload = json.loads(report.to_json())
     assert payload["ok"] is True
     assert payload["version"] == "1.2.0"
@@ -118,6 +156,31 @@ def test_blocked_import_is_reported_as_skipped_not_ok_or_failed(tmp_path):
     assert statuses["imports"] != "ok"
     assert statuses["imports"] != "failed"
     assert report.ok is True  # binaries had nothing to repair against a dry run; run continues
+
+
+# ------------------------------------------------------- interpreter identity, not just argv shape
+
+
+def test_imports_step_probes_the_venvs_python_not_the_system_one(tmp_path):
+    """A step that probed the wrong interpreter must make the fake raise, not succeed quietly.
+
+    `state` carries both the venv's python (what `imports` is supposed to use) and the
+    system interpreter (what `interpreter` chose) under different keys, so a step that
+    reached for the wrong one would produce a different `argv[0]` — not a `KeyError` —
+    and this fake is built to catch exactly that.
+    """
+    venv_py = str(_venv_python_path(tmp_path / "venv"))
+    system_py = sys.executable
+
+    def run(argv):
+        argv = list(argv)
+        if argv[0] != venv_py:
+            raise AssertionError(f"probed {argv[0]!r}, expected the venv's python {venv_py!r}")
+        return 0, json.dumps({"ok": True})
+
+    state = {"venv_python": venv_py, "interpreter": system_py}
+    status, _detail = _step_imports(Options(dry_run=True), state, run)
+    assert status == "ok"
 
 
 # --------------------------------------------------------------- exact argv, real subprocess
