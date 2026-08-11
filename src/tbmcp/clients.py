@@ -101,6 +101,24 @@ class Ctx:
 # ------------------------------------------------------------------- the command
 
 
+def _probe_exit(argv: list[str]) -> int:
+    done = subprocess.run(argv, capture_output=True, timeout=2)
+    return done.returncode
+
+
+def _runnable(path: Path) -> bool:
+    """Does this launcher actually start?
+
+    `is_file()` is not enough. Windows Application Control blocks pip's generated
+    `.exe` shims, and the failure only shows up in the client as a timeout with no
+    stated cause. Two seconds of `--help` here buys a config that works.
+    """
+    try:
+        return _probe_exit([str(path), "--help"]) == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def _console_script() -> Path | None:
     """Absolute path to the installed `thunderbird-mcp` launcher, if there is one.
 
@@ -123,7 +141,9 @@ def _console_script() -> Path | None:
     ]
     for path in candidates:
         if path.is_file() and path.suffix.lower() not in (".cmd", ".bat", ".ps1"):
-            return path.resolve()
+            resolved = path.resolve()
+            if _runnable(resolved):
+                return resolved
     return None
 
 
