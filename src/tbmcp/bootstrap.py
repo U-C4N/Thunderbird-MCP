@@ -195,7 +195,11 @@ def repair_imports(
         if started_at is not None and current is not None and current != started_at:
             repairs.append(Repair(dist=dist, from_version=started_at, to_version=current))
 
-        if failure is not None:
+        if (
+            failure is not None
+            and failure.module
+            and distribution_for(python, failure.module, run=run) == dist
+        ):
             return repairs, failure
 
     return repairs, None
