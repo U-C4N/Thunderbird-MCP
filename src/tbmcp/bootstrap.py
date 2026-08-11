@@ -13,6 +13,7 @@ import pathlib
 import shutil
 import subprocess
 import sys
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
@@ -301,3 +302,244 @@ def choose_interpreter(
         f"none of the {len(pool)} interpreters found can load sqlite3/ssl/ctypes. "
         "Install python.org CPython 3.11+ and re-run with --python."
     )
+
+
+VERSION = "1.2.0"
+GIT_SOURCE = "git+https://github.com/U-C4N/Thunderbird-MCP"
+
+
+@dataclass
+class Step:
+    name: str
+    status: str
+    seconds: float
+    detail: str = ""
+
+
+@dataclass
+class Options:
+    python: str | None = None
+    venv: pathlib.Path | None = None
+    clients: tuple[str, ...] = ()
+    toolsets: str | None = None
+    json_out: bool = False
+    dry_run: bool = False
+    skip_addon: bool = False
+    source: str | None = None
+
+
+@dataclass
+class Report:
+    ok: bool
+    version: str
+    launcher: dict | None
+    steps: list[Step]
+    next_command: str | None
+
+    def to_json(self) -> str:
+        return json.dumps(
+            {
+                "ok": self.ok,
+                "version": self.version,
+                "launcher": self.launcher,
+                "steps": [vars(step) for step in self.steps],
+                "next_command": self.next_command,
+            },
+            indent=2,
+        )
+
+    def to_text(self) -> str:
+        lines = ["thunderbird-mcp bootstrap", ""]
+        for step in self.steps:
+            lines.append(f"  {step.name:<14} {step.status:<10} {step.detail}".rstrip())
+        lines.append("")
+        lines.append("Ready." if self.ok else f"Stopped. Next:  {self.next_command}")
+        return "\n".join(lines)
+
+
+def default_venv_dir() -> pathlib.Path:
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA") or str(pathlib.Path.home() / "AppData" / "Local")
+        return pathlib.Path(base) / "thunderbird-mcp" / "venv"
+    return pathlib.Path.home() / ".local" / "share" / "thunderbird-mcp" / "venv"
+
+
+def venv_python(venv_dir: pathlib.Path) -> pathlib.Path:
+    if os.name == "nt":
+        return venv_dir / "Scripts" / "python.exe"
+    return venv_dir / "bin" / "python"
+
+
+def _clone_source() -> str | None:
+    """The checkout this file lives in, if it is part of one; `None` otherwise.
+
+    A bare `bootstrap.py` handed to an agent has no such checkout — it must pull the
+    package from git. But run from inside the repo, installing `GIT_SOURCE` would
+    throw away whatever local changes are the reason for testing here at all.
+    """
+    root = pathlib.Path(__file__).resolve().parents[2]
+    pyproject = root / "pyproject.toml"
+    try:
+        text = pyproject.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    if 'name = "thunderbird-mcp"' in text:
+        return str(root)
+    return None
+
+
+def _step_interpreter(options: Options, state: dict, run: Runner) -> tuple[str, str]:
+    python = choose_interpreter(options.python, run=run)
+    state["interpreter"] = python
+    return "ok", python
+
+
+def _step_venv(options: Options, state: dict, run: Runner) -> tuple[str, str]:
+    """Reuse a venv that already loads; otherwise create one, unless `--dry-run`."""
+    venv_dir: pathlib.Path = state["venv"]
+    python_path = venv_python(venv_dir)
+    if python_path.is_file() and interpreter_ok(str(python_path), run=run):
+        state["venv_python"] = str(python_path)
+        return "ok", f"reusing existing venv at {venv_dir}"
+    if options.dry_run:
+        state["venv_python"] = str(python_path)
+        return "ok", f"would create venv at {venv_dir}"
+    status, output = run([state["interpreter"], "-m", "venv", str(venv_dir)])
+    if status != 0:
+        return "failed", f"could not create venv at {venv_dir}: {output.strip()}"
+    state["venv_python"] = str(python_path)
+    return "ok", f"created venv at {venv_dir}"
+
+
+def _step_install(options: Options, state: dict, run: Runner) -> tuple[str, str]:
+    """Install the package into the venv, preferring an explicit source, then a local clone."""
+    source = options.source or _clone_source() or GIT_SOURCE
+    if options.dry_run:
+        return "ok", f"would install {source}"
+    venv_dir: pathlib.Path = state["venv"]
+    argv = [state["venv_python"], "-m", "pip", "install", "--quiet", source]
+    constraints = venv_dir / "constraints.txt"
+    if constraints.is_file():
+        argv += ["-c", str(constraints)]
+    status, output = run(argv)
+    if status != 0:
+        return "failed", f"pip install {source} failed: {output.strip()}"
+    return "ok", f"installed {source}"
+
+
+def _step_imports(options: Options, state: dict, run: Runner) -> tuple[str, str]:
+    """Probe `tbmcp.server`; a blocked import is not a failure yet — `binaries` repairs it."""
+    failure = probe_import(state["venv_python"], run=run)
+    state["import_failure"] = failure
+    if failure is None:
+        return "ok", "tbmcp.server imports cleanly"
+    return "ok", f"{failure.module or 'tbmcp.server'} failed to import; handing off to binaries"
+
+
+def _step_binaries(options: Options, state: dict, run: Runner) -> tuple[str, str]:
+    failure: ImportFailure | None = state.get("import_failure")
+    if failure is None:
+        return "skipped", "imports already clean"
+    if options.dry_run:
+        return "skipped", f"dry-run: would attempt to repair {failure.module or 'unknown'}"
+    python = state["venv_python"]
+    repairs, remaining = repair_imports(python, run=run)
+    state["repairs"] = repairs
+    write_constraints(state["venv"], repairs)
+    if remaining is not None:
+        module = remaining.module or "target"
+        return "failed", f"{module} import still blocked after repair attempts: {remaining.message}"
+    if repairs:
+        names = ", ".join(f"{r.dist} {r.from_version}->{r.to_version}" for r in repairs)
+        return "repaired", names
+    return "ok", "import resolved without a downgrade"
+
+
+def _step_launcher(options: Options, state: dict, run: Runner) -> tuple[str, str]:
+    python = str(state["venv_python"])
+    state["launcher"] = {"command": python, "args": ["-m", "tbmcp"]}
+    return "ok", f"{python} -m tbmcp"
+
+
+def _step_addon(options: Options, state: dict, run: Runner) -> tuple[str, str]:
+    """`--yes` is mandatory: `cmd_install_addon` calls `input()` without it and would hang."""
+    if options.dry_run:
+        return "ok", "dry-run: would install the bridge add-on"
+    status, output = run([state["venv_python"], "-m", "tbmcp", "install-addon", "--yes"])
+    if status != 0:
+        return "failed", output.strip() or "install-addon failed"
+    return "ok", output.strip() or "add-on installed"
+
+
+def _step_clients(options: Options, state: dict, run: Runner) -> tuple[str, str]:
+    if not options.clients:
+        return "skipped", "no clients requested"
+    if options.dry_run:
+        return "ok", f"dry-run: would configure {', '.join(options.clients)}"
+    argv = [state["venv_python"], "-m", "tbmcp", "setup", *options.clients]
+    if options.toolsets:
+        argv += ["--toolsets", options.toolsets]
+    status, output = run(argv)
+    if status != 0:
+        return "failed", output.strip() or "client setup failed"
+    return "ok", output.strip() or f"configured {', '.join(options.clients)}"
+
+
+def _step_verify(options: Options, state: dict, run: Runner) -> tuple[str, str]:
+    if options.dry_run:
+        return "ok", "dry-run: skipping post-install verification"
+    status, output = run([state["venv_python"], "-m", "tbmcp", "doctor", "--json"])
+    if status != 0:
+        return "failed", output.strip() or "doctor reported a problem"
+    return "ok", output.strip() or "doctor: healthy"
+
+
+_STEPS = (
+    ("interpreter", _step_interpreter),
+    ("venv", _step_venv),
+    ("install", _step_install),
+    ("imports", _step_imports),
+    ("binaries", _step_binaries),
+    ("launcher", _step_launcher),
+    ("addon", _step_addon),
+    ("clients", _step_clients),
+    ("verify", _step_verify),
+)
+
+
+def _remedy(step_name: str, detail: str) -> str:
+    """The single next command to run, given where the run stopped."""
+    if step_name == "interpreter":
+        return "python bootstrap.py --python <path-to-a-real-python>"
+    if step_name == "binaries":
+        module = detail.split(" ", 1)[0] if detail else "<dist>"
+        return f'pip install "{module}==<older>"'
+    return "tbmcp doctor"
+
+
+def bootstrap(options: Options, *, run: Runner = run_capture) -> Report:
+    """Run every step in order, stopping at the first one that cannot be repaired."""
+    venv_dir = options.venv or default_venv_dir()
+    steps: list[Step] = []
+    state: dict[str, object] = {"venv": venv_dir, "launcher": None}
+
+    for name, action in _STEPS:
+        if name == "addon" and options.skip_addon:
+            steps.append(Step(name, "skipped", 0.0, "--skip-addon"))
+            continue
+        started = time.monotonic()
+        try:
+            status, detail = action(options, state, run)
+        except BootstrapError as exc:
+            status, detail = "failed", str(exc)
+        steps.append(Step(name, status, round(time.monotonic() - started, 2), detail))
+        if status == "failed":
+            return Report(
+                ok=False,
+                version=VERSION,
+                launcher=state.get("launcher"),
+                steps=steps,
+                next_command=_remedy(name, detail),
+            )
+
+    return Report(True, VERSION, state.get("launcher"), steps, None)
