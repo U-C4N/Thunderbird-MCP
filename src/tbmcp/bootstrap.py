@@ -428,12 +428,17 @@ def _step_install(options: Options, state: dict, run: Runner) -> tuple[str, str]
 
 
 def _step_imports(options: Options, state: dict, run: Runner) -> tuple[str, str]:
-    """Probe `tbmcp.server`; a blocked import is not a failure yet — `binaries` repairs it."""
+    """Probe `tbmcp.server`; a blocked import is not a failure yet — `binaries` repairs it.
+
+    `"ok"` would tell a reader the import worked when it did not; `"failed"` would halt
+    the driver before `binaries` gets a chance to repair it. `"skipped"` claims nothing
+    and stops nothing, which is exactly what a deferred outcome is.
+    """
     failure = probe_import(state["venv_python"], run=run)
     state["import_failure"] = failure
     if failure is None:
         return "ok", "tbmcp.server imports cleanly"
-    return "ok", f"{failure.module or 'tbmcp.server'} failed to import; handing off to binaries"
+    return "skipped", f"{failure.module or 'tbmcp.server'} failed to import; handing off to binaries"
 
 
 def _step_binaries(options: Options, state: dict, run: Runner) -> tuple[str, str]:
@@ -507,10 +512,23 @@ _STEPS = (
 )
 
 
-def _remedy(step_name: str, detail: str) -> str:
-    """The single next command to run, given where the run stopped."""
+def _remedy(step_name: str, detail: str, options: Options, state: dict) -> str:
+    """The single next command to run, given where the run stopped.
+
+    `tbmcp doctor` only works once the package is actually installed into the venv —
+    naming it for a `venv` or `install` failure would hand back a command that cannot
+    run. Those two get a command built from what already exists at that point: the
+    interpreter that was chosen, or the venv that was created.
+    """
     if step_name == "interpreter":
         return "python bootstrap.py --python <path-to-a-real-python>"
+    if step_name == "venv":
+        interpreter = state.get("interpreter") or "<path-to-a-real-python>"
+        return f'"{interpreter}" -m venv "{state["venv"]}"'
+    if step_name == "install":
+        python = state.get("venv_python") or str(venv_python(state["venv"]))
+        source = options.source or _clone_source() or GIT_SOURCE
+        return f'"{python}" -m pip install "{source}"'
     if step_name == "binaries":
         module = detail.split(" ", 1)[0] if detail else "<dist>"
         return f'pip install "{module}==<older>"'
@@ -539,7 +557,7 @@ def bootstrap(options: Options, *, run: Runner = run_capture) -> Report:
                 version=VERSION,
                 launcher=state.get("launcher"),
                 steps=steps,
-                next_command=_remedy(name, detail),
+                next_command=_remedy(name, detail, options, state),
             )
 
     return Report(True, VERSION, state.get("launcher"), steps, None)
