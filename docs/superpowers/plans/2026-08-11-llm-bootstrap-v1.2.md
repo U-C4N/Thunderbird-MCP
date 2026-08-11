@@ -132,14 +132,13 @@ import json
 
 from tbmcp.bootstrap import ImportFailure, probe_import
 
+BLOCKED_PATH = r"C:\venv\Lib\site-packages\_cffi_backend.cp314-win_amd64.pyd"
+BLOCKED_MESSAGE = (
+    "DLL load failed while importing _cffi_backend: "
+    "Uygulama Denetimi ilkesi bu dosyayi engelledi."
+)
 BLOCKED = json.dumps(
-    {
-        "ok": False,
-        "name": "_cffi_backend",
-        "path": r"C:\venv\Lib\site-packages\_cffi_backend.cp314-win_amd64.pyd",
-        "message": "DLL load failed while importing _cffi_backend: "
-        "Uygulama Denetimi ilkesi bu dosyayi engelledi.",
-    }
+    {"ok": False, "name": "_cffi_backend", "path": BLOCKED_PATH, "message": BLOCKED_MESSAGE}
 )
 
 
@@ -156,9 +155,7 @@ def test_failure_reports_module_and_path():
 
     failure = probe_import("python", run=run)
     assert failure == ImportFailure(
-        module="_cffi_backend",
-        path=r"C:\venv\Lib\site-packages\_cffi_backend.cp314-win_amd64.pyd",
-        message=BLOCKED and json.loads(BLOCKED)["message"],
+        module="_cffi_backend", path=BLOCKED_PATH, message=BLOCKED_MESSAGE
     )
 
 
@@ -359,7 +356,7 @@ class FakeEnv:
             return 0, json.dumps({"ok": True})
         if "packages_distributions" in " ".join(argv):
             return 0, json.dumps({"dist": "cffi"})
-        if "--version-of" in argv:
+        if "PackageNotFoundError" in " ".join(argv):
             return 0, json.dumps({"version": self.current})
         if "install" in argv:
             spec = argv[-1]
@@ -456,7 +453,7 @@ def distribution_for(python: str, module: str, *, run: Runner = run_capture) -> 
 
 
 def installed_version(python: str, dist: str, *, run: Runner = run_capture) -> str | None:
-    _status, output = run([python, "-c", _VERSION_OF, "--version-of", dist][:3] + [dist])
+    _status, output = run([python, "-c", _VERSION_OF, dist])
     return _json_field(output, "version")
 
 
@@ -525,7 +522,7 @@ Add `import pathlib` to the imports at the top of the file.
 - [ ] **Step 4: Run the test**
 
 Run: `.venv/Scripts/python.exe -m pytest tests/test_bootstrap_repair.py -v`
-Expected: PASS, 5 tests. If `installed_version`'s argv slicing reads awkwardly, simplify it to `run([python, "-c", _VERSION_OF, dist])` and update the fake's `--version-of` branch to match on `_VERSION_OF`'s content instead.
+Expected: PASS, 5 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -750,6 +747,7 @@ client that times out with nothing to point at.
 
 from __future__ import annotations
 
+import os
 import pathlib
 
 import pytest
@@ -760,7 +758,7 @@ from tbmcp.config import Settings
 
 @pytest.fixture
 def shim(tmp_path: pathlib.Path) -> pathlib.Path:
-    path = tmp_path / ("thunderbird-mcp.exe" if clients.os.name == "nt" else "thunderbird-mcp")
+    path = tmp_path / ("thunderbird-mcp.exe" if os.name == "nt" else "thunderbird-mcp")
     path.write_bytes(b"MZ")
     return path
 
@@ -1114,6 +1112,7 @@ git commit -m "feat: bootstrap step engine with machine-readable reporting"
 
 from __future__ import annotations
 
+import os
 import pathlib
 import subprocess
 import sys
@@ -1132,12 +1131,14 @@ def test_module_imports_without_the_package_on_the_path(tmp_path):
         "print(module.VERSION)\n",
         encoding="utf-8",
     )
+    env = dict(os.environ)
+    env["PYTHONPATH"] = ""  # nothing from the caller's environment puts tbmcp on the path
     done = subprocess.run(
-        [sys.executable, str(script)],
+        [sys.executable, "-I", str(script)],
         capture_output=True,
         text=True,
         cwd=tmp_path,
-        env={"PYTHONPATH": "", "PATH": ""} | {"SYSTEMROOT": "C:\\Windows"},
+        env=env,
     )
     assert done.returncode == 0, done.stderr
     assert "1.2.0" in done.stdout
@@ -1494,9 +1495,12 @@ Options and venv location → Tasks 6–7. Three platforms → Task 8. Testing s
 tests in Tasks 2–7 plus the stdlib-only guard in Task 7. Version and release → Tasks
 1 and 10. README → Task 9. No spec section is unclaimed.
 
-**Known rough edge.** Task 3's `installed_version` argv construction is awkward and
-Task 3 Step 4 says so, with the simplification to apply if the test disagrees.
-Better to name it than to let the implementer discover it as a mystery.
+**Pre-flight pass (2026-08-11).** A conflict scan before dispatch found four places
+where the plan's own sample code would have made an implementer write something a
+reviewer should reject: a contorted expression in Task 2's expected value, Task 3's
+`installed_version` argv slicing, Task 5 reaching for `os` through the `clients`
+module, and Task 7's hand-built `env` that only made sense on Windows. All four are
+corrected above. Mandating a defect and then reviewing for it wastes a fix round.
 
 **Type consistency.** `Runner` and `RunResult` are defined once in Task 2 and used
 unchanged in 3, 4, and 6. `ImportFailure` fields (`module`, `path`, `message`) are
