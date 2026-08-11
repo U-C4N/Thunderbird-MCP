@@ -64,8 +64,8 @@ def test_console_script_returns_none_when_all_unrunnable(monkeypatch, tmp_path):
     assert result is None
 
 
-def test_console_script_returns_runnable_candidate(monkeypatch, tmp_path):
-    """The candidate loop returns the first runnable candidate."""
+def test_console_script_skips_unrunnable_candidate(monkeypatch, tmp_path):
+    """The candidate loop skips unrunnable paths and returns the first runnable one."""
     fake_python = tmp_path / "python.exe"
     fake_python.write_bytes(b"fake")
 
@@ -73,11 +73,18 @@ def test_console_script_returns_runnable_candidate(monkeypatch, tmp_path):
     monkeypatch.setattr(clients.sys, "executable", str(fake_python))
     # All candidates exist as files
     monkeypatch.setattr(clients.Path, "is_file", lambda self: True)
-    # Only the .exe candidate is runnable
-    def is_runnable(path):
-        return str(path).endswith(("thunderbird-mcp.exe", "thunderbird-mcp"))
-    monkeypatch.setattr(clients, "_runnable", is_runnable)
+
+    # First candidate (here/"thunderbird-mcp.exe") is unrunnable,
+    # second candidate (here/"thunderbird-mcp") is runnable.
+    # The guard must cause the loop to skip the first and return the second.
+    def mock_runnable(path):
+        # .exe files are unrunnable; others are runnable
+        return not str(path).endswith(".exe")
+
+    monkeypatch.setattr(clients, "_runnable", mock_runnable)
 
     result = clients._console_script()
     assert result is not None
-    assert result.name == "thunderbird-mcp.exe"
+    # Must be the second candidate (here/"thunderbird-mcp"), not the first (here/"thunderbird-mcp.exe")
+    # Only true if the guard skips the unrunnable .exe and continues to check the next candidate
+    assert result.name == "thunderbird-mcp"
