@@ -43,34 +43,72 @@ Thunderbird from both at the same time.
 
 ## Quick start
 
+There is no PyPI package to install from yet — clone the repo and let it build its
+own environment:
+
 ```bash
-uv tool install thunderbird-mcp        # or: pipx install thunderbird-mcp
-tbmcp install-addon                    # builds the add-on and installs it into Thunderbird
-tbmcp setup claude-code codex          # registers the server with your clients
-tbmcp doctor                           # confirms every link in the chain
+git clone https://github.com/U-C4N/Thunderbird-MCP
+cd Thunderbird-MCP
+python bootstrap.py
 ```
 
-`install-addon` closes Thunderbird, installs through Thunderbird's own automation
-channel, and starts it again — no clicking through the Add-ons UI. Prefer to do it by
-hand? `tbmcp install-addon --manual` builds the package and prints the three clicks.
+One command: it picks an interpreter that works, builds the environment, installs
+the add-on, and verifies the whole chain before it returns. Re-running it is safe —
+healthy steps are no-ops. Add `--clients claude-code,codex` to also register those
+clients in the same run, or do it afterward from "Install into a client" below.
+
+Installing the add-on closes Thunderbird, installs through Thunderbird's own
+automation channel, and starts it again — no clicking through the Add-ons UI;
+`bootstrap` does this for you as its `addon` step. Prefer to do it by hand, or on its
+own? `tbmcp install-addon --manual` builds the package and prints the three clicks.
+
+Already installed? `tbmcp bootstrap` does the same thing.
+
+### For AI agents
+
+```bash
+python bootstrap.py --json
+```
+
+Emits one object: `ok`, `version`, `launcher`, `steps[]` (each with `name`,
+`status`, `seconds`, `detail`), and `next_command` — null on success, otherwise the
+single command that addresses the failure. `status` is one of `ok`, `repaired`,
+`skipped`, `failed`. Parse this instead of the human output; the columns are not a
+stable interface and the JSON is.
 
 A healthy `doctor` looks like this:
 
 ```
+thunderbird-mcp doctor
+
+Python
+  version                    3.14.6
+  interpreter                C:\Users\VECTOR\Documents\GitHub\Thunderbird-MCP\.venv\Scripts\python.exe
+
 Thunderbird
   executable                 C:\Program Files\Mozilla Thunderbird\thunderbird.exe
-  add-on version (source)    0.1.4
-  profile                    …\Profiles\fw0oundg.default-release
-  accounts (from prefs.js)   3
-  add-on startup report      2026-07-29T11:37:46.643Z
+  running                    True
+  add-on version (source)    1.2.0
+  profile                    C:\Users\VECTOR\AppData\Roaming\Thunderbird\Profiles\81l4u5ba.default-release
+  accounts (from prefs.js)   2
+  outgoing servers           1
+  global index db            True
+  add-on startup report      2026-08-11T06:41:40.527Z
   privileged modules         12 loaded
   bridge methods             128
 
 Bridge
-  daemon                     pid 94108
+  daemon                     pid 31120
   connected                  True
+  add-on version (live)      1.2.0
   privileged half            True
-  app                        Thunderbird 153.0
+  app                        Thunderbird 153.0.2
+  tb_status tool call        connected
+
+Tools
+  toolsets                   mail,folders,compose,search,admin
+  read-only                  False
+  send mode                  draft
 ```
 
 ---
@@ -90,11 +128,16 @@ has no `cwd` setting:
 ```bash
 claude mcp add-json thunderbird '{
   "type": "stdio",
-  "command": "C:\\Users\\you\\.local\\bin\\thunderbird-mcp.exe",
-  "args": ["serve", "--toolsets", "all"],
+  "command": "C:\\Users\\you\\Thunderbird-MCP\\.venv\\Scripts\\python.exe",
+  "args": ["-m", "tbmcp", "serve", "--toolsets", "all"],
   "env": { "PYTHONUTF8": "1", "PYTHONUNBUFFERED": "1" }
 }' --scope user
 ```
+
+`bootstrap` picks this for you and tests it first — write it by hand only if you know
+the console script runs on your machine. Where Windows Application Control blocks
+pip's console shims (`thunderbird-mcp.exe`), a config that points at it produces a
+client that times out with nothing to point at; `python -m tbmcp` always works.
 
 Verify with `claude mcp get thunderbird`, or `/mcp` inside a session.
 
@@ -115,8 +158,8 @@ Or by hand in `~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.thunderbird]
-command = 'C:\Users\you\.local\bin\thunderbird-mcp.exe'
-args = ["serve", "--toolsets", "all"]
+command = 'C:\Users\you\Thunderbird-MCP\.venv\Scripts\python.exe'
+args = ["-m", "tbmcp", "serve", "--toolsets", "all"]
 env = { PYTHONUTF8 = "1", PYTHONUNBUFFERED = "1" }
 startup_timeout_sec = 60
 tool_timeout_sec = 120
@@ -129,9 +172,11 @@ approval_mode = "approve"
 approval_mode = "approve"
 ```
 
-Windows paths must be **single-quoted** TOML literals — `"C:\Users\…"` is an invalid
-escape sequence. Codex also builds the child environment from scratch, so anything
-your server needs has to be in `env`. Verify with `codex mcp get thunderbird --json`.
+`bootstrap` picks this for you and tests it first — write it by hand only if you know
+the console script runs on your machine. Windows paths must be **single-quoted** TOML
+literals — `"C:\Users\…"` is an invalid escape sequence. Codex also builds the child
+environment from scratch, so anything your server needs has to be in `env`. Verify
+with `codex mcp get thunderbird --json`.
 
 </details>
 
@@ -454,6 +499,7 @@ active, is itself the diagnosis.
 | the first tool call after a killed daemon fails | the add-on takes ~40-60 s to reattach after an *abnormal* daemon exit; retry, or `tbmcp doctor --wait 60`. A clean exit reattaches in about a second. [Details](docs/VERIFIED-FINDINGS.md) |
 | Codex reports a startup timeout | raise `startup_timeout_sec`; Codex defaults to 10 s |
 | Claude Code truncates a large result | raise `MAX_MCP_OUTPUT_TOKENS` (default 25,000) |
+| A dependency fails with "DLL load failed" or "cannot open shared object file" | A binary your OS will not load — Windows Application Control blocks unsigned, low-reputation wheels. `bootstrap` detects this and downgrades the offending package automatically; run `python bootstrap.py` and read the `binaries` step. |
 
 `TBMCP_DEBUG=1` turns on verbose logging to stderr. The add-on logs to Thunderbird's
 error console with a `[tbmcp]` prefix, and `tb_console` returns those lines as a tool.
@@ -465,7 +511,7 @@ error console with a `[tbmcp]` prefix, and `tb_console` returns those lines as a
 ```bash
 uv venv && uv pip install -e ".[dev]"
 
-pytest                                  # 85 tests, no Thunderbird needed
+pytest                                  # 181 tests, no Thunderbird needed
 ruff check . && ruff format --check .
 python tools/check_consistency.py       # do all three layers still agree?
 python tools/build_xpi.py build         # build the add-on package

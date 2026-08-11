@@ -1,0 +1,97 @@
+"""A console script that exists is not the same as one that runs.
+
+Windows Application Control blocks pip's generated .exe shims: the file is right
+there, `is_file()` is true, and spawning it raises. Registering that path produces a
+client that times out with nothing to point at.
+"""
+
+from __future__ import annotations
+
+import os
+import pathlib
+import sys
+
+import pytest
+
+from tbmcp import clients
+from tbmcp.config import Settings
+
+
+@pytest.fixture
+def shim(tmp_path: pathlib.Path) -> pathlib.Path:
+    path = tmp_path / ("thunderbird-mcp.exe" if os.name == "nt" else "thunderbird-mcp")
+    path.write_bytes(b"MZ")
+    return path
+
+
+def test_unrunnable_shim_is_rejected(monkeypatch, shim):
+    def blocked(argv, **kwargs):
+        raise OSError("Uygulama Denetimi ilkesi bu dosyayi engelledi")
+
+    monkeypatch.setattr(clients.subprocess, "run", blocked)
+    assert clients._runnable(shim) is False
+
+
+def test_nonzero_exit_is_rejected(monkeypatch, shim):
+    monkeypatch.setattr(clients, "_probe_exit", lambda argv: 1)
+    assert clients._runnable(shim) is False
+
+
+def test_runnable_shim_is_accepted(monkeypatch, shim):
+    monkeypatch.setattr(clients, "_probe_exit", lambda argv: 0)
+    assert clients._runnable(shim) is True
+
+
+def test_server_command_falls_back_to_module(monkeypatch):
+    """The fallback names this interpreter, whatever it happens to be called.
+
+    Matching the tail against a list of plausible names is what a Windows-only
+    author writes: CI runs on `python3.13`, and the suffix list quietly decided
+    the three-platform claim was false.
+    """
+    monkeypatch.setattr(clients, "_console_script", lambda: None)
+    command, args = clients.server_command(Settings())
+    assert args[:2] == ["-m", "tbmcp"]
+    assert command == str(pathlib.Path(sys.executable).resolve())
+
+
+def test_console_script_returns_none_when_all_unrunnable(monkeypatch, tmp_path):
+    """The candidate loop rejects all unrunnable paths and returns None."""
+    fake_python = tmp_path / "python.exe"
+    fake_python.write_bytes(b"fake")
+
+    monkeypatch.setattr(clients.shutil, "which", lambda name: None)
+    monkeypatch.setattr(clients.sys, "executable", str(fake_python))
+    # All candidates exist as files
+    monkeypatch.setattr(clients.Path, "is_file", lambda self: True)
+    # But all are unrunnable
+    monkeypatch.setattr(clients, "_runnable", lambda path: False)
+
+    result = clients._console_script()
+    assert result is None
+
+
+def test_console_script_skips_unrunnable_candidate(monkeypatch, tmp_path):
+    """The candidate loop skips unrunnable paths and returns the first runnable one."""
+    fake_python = tmp_path / "python.exe"
+    fake_python.write_bytes(b"fake")
+
+    monkeypatch.setattr(clients.shutil, "which", lambda name: None)
+    monkeypatch.setattr(clients.sys, "executable", str(fake_python))
+    # All candidates exist as files
+    monkeypatch.setattr(clients.Path, "is_file", lambda self: True)
+
+    # First candidate (here/"thunderbird-mcp.exe") is unrunnable,
+    # second candidate (here/"thunderbird-mcp") is runnable.
+    # The guard must cause the loop to skip the first and return the second.
+    def mock_runnable(path):
+        # .exe files are unrunnable; others are runnable
+        return not str(path).endswith(".exe")
+
+    monkeypatch.setattr(clients, "_runnable", mock_runnable)
+
+    result = clients._console_script()
+    assert result is not None
+    # Must be the second candidate (here/"thunderbird-mcp"), not the first (here/"thunderbird-mcp.exe")
+    # Only true if the guard skips the unrunnable .exe and continues to check the next candidate
+    assert result.name == "thunderbird-mcp"
