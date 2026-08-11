@@ -101,17 +101,21 @@ signatures or query OS policy, both of which are platform-specific and lie.
 
 ### Blocked-binary repair (steps 4–5)
 
-Detection keys on Python's own message, never the OS text. `ImportError` from a
-failed extension load always reads:
+Detection reads structured attributes off the exception, never text. Measured on the
+affected machine on 2026-08-11 against a real blocked wheel:
 
-```
-DLL load failed while importing <module>: <OS message, in the system locale>
+```json
+{"type": "ImportError", "name": "_cffi_backend",
+ "path": ".../site-packages/_cffi_backend.cp314-win_amd64.pyd",
+ "msg": "DLL load failed while importing _cffi_backend: Uygulama Dene…"}
 ```
 
-The prefix is Python's and is English regardless of locale; the tail was Turkish on
-the observed machine. The parser extracts `<module>` from the prefix and ignores the
-tail entirely. The equivalent Linux/macOS forms (`cannot open shared object file`,
-`Library not loaded`) are parsed from the same function.
+`ImportError.name` carries the module and `.path` the exact file, both populated by
+the loader before any OS message is formatted. Parsing the message was the original
+plan; it is unnecessary. The attributes are identical on Windows, macOS, and Linux,
+so one code path covers all three and no locale can break it — note the message tail
+above is Turkish. The import probe runs in a subprocess and reports `name`, `path`,
+and `msg` as JSON; `msg` is recorded for the user's eyes only and never matched on.
 
 Repair maps module → distribution via `importlib.metadata.packages_distributions()`,
 then walks the version down with `pip install "<dist><<current>"`, which resolves to
@@ -163,8 +167,8 @@ disposable and re-running from a different directory finds the same environment.
 
 Unit tests, no OS policy required:
 
-- `DLL load failed` parser against Turkish, English, and German OS tails, plus the
-  Linux and macOS message forms.
+- Import probe reporting: a failed load yields the module name and file path from the
+  exception attributes, and a Turkish OS message tail changes nothing.
 - Downgrade planner: bounds respected, gives up with a named module, emits
   constraints.
 - Interpreter ranking: uv-managed ranked last, explicit `--python` wins, a candidate
