@@ -290,6 +290,20 @@ def cmd_tools(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_bootstrap(args: argparse.Namespace) -> int:
+    from .bootstrap import main as bootstrap_main
+
+    forwarded: list[str] = []
+    for flag in ("python", "venv", "clients", "toolsets", "source"):
+        value = getattr(args, flag, None)
+        if value:
+            forwarded += [f"--{flag}", str(value)]
+    for flag in ("skip_addon", "dry_run", "json"):
+        if getattr(args, flag, False):
+            forwarded.append("--" + flag.replace("_", "-"))
+    return bootstrap_main(forwarded)
+
+
 # ------------------------------------------------------------------------ parser
 
 
@@ -386,6 +400,17 @@ def build_parser() -> argparse.ArgumentParser:
     add_common(tools)
     tools.add_argument("--json", action="store_true")
     tools.set_defaults(func=cmd_tools)
+
+    boot = subparsers.add_parser("bootstrap", help="install, repair, register, verify")
+    boot.add_argument("--python")
+    boot.add_argument("--venv")
+    boot.add_argument("--clients")
+    boot.add_argument("--toolsets")
+    boot.add_argument("--source")
+    boot.add_argument("--skip-addon", action="store_true")
+    boot.add_argument("--dry-run", action="store_true")
+    boot.add_argument("--json", action="store_true")
+    boot.set_defaults(func=cmd_bootstrap)
 
     return parser
 

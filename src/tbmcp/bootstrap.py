@@ -7,6 +7,7 @@ of it. A subcommand cannot repair a state in which its own package will not load
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import pathlib
@@ -561,3 +562,38 @@ def bootstrap(options: Options, *, run: Runner = run_capture) -> Report:
             )
 
     return Report(True, VERSION, state.get("launcher"), steps, None)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="tbmcp bootstrap",
+        description="Install, repair, register, and verify in one command.",
+    )
+    parser.add_argument("--python", help="interpreter to build the environment with")
+    parser.add_argument("--venv", type=pathlib.Path, help="where to put the environment")
+    parser.add_argument("--clients", help="comma separated; default: auto-detect")
+    parser.add_argument("--toolsets", help="passed through to setup")
+    parser.add_argument("--source", help=f"install from here (default: {GIT_SOURCE})")
+    parser.add_argument("--skip-addon", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--json", dest="json_out", action="store_true")
+    args = parser.parse_args(argv)
+
+    report = bootstrap(
+        Options(
+            python=args.python,
+            venv=args.venv,
+            clients=tuple(c.strip() for c in (args.clients or "").split(",") if c.strip()),
+            toolsets=args.toolsets,
+            json_out=args.json_out,
+            dry_run=args.dry_run,
+            skip_addon=args.skip_addon,
+            source=args.source,
+        )
+    )
+    print(report.to_json() if args.json_out else report.to_text())
+    return 0 if report.ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
