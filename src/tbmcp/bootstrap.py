@@ -477,18 +477,58 @@ def _step_addon(options: Options, state: dict, run: Runner) -> tuple[str, str]:
     return "ok", output.strip() or "add-on installed"
 
 
+def _detected_clients(python: str, run: Runner) -> tuple[str, ...]:
+    """Ask the installed package which clients it can see, via `detect-clients`.
+
+    Shelling out through the venv's interpreter is the only option: this module may
+    not import `tbmcp.clients` even indirectly, since it has to run before the
+    package is importable at all. A non-zero exit or unparsable output is treated as
+    "nothing found" rather than an error — detection is a convenience, and its
+    failure should read the same as an empty machine, not stop the run.
+    """
+    status, output = run([python, "-m", "tbmcp", "detect-clients"])
+    if status != 0:
+        return ()
+    for line in reversed(output.splitlines()):
+        line = line.strip()
+        if line.startswith("["):
+            try:
+                data = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(data, list):
+                return tuple(str(item) for item in data)
+    return ()
+
+
 def _step_clients(options: Options, state: dict, run: Runner) -> tuple[str, str]:
-    if not options.clients:
-        return "skipped", "no clients requested"
+    """Register with the clients asked for, or with whatever `detect-clients` finds.
+
+    Detection only ever fills in for an *absent* `--clients`, never overrides one
+    that was given: asking for a specific client must not silently grow or shrink to
+    match what happens to be installed. It runs even under `--dry-run` because it
+    only reads the machine — the write it would lead to is what `--dry-run` actually
+    gates.
+    """
+    clients = options.clients
+    detected = False
+    if not clients:
+        detected = True
+        clients = _detected_clients(state["venv_python"], run)
+        if not clients:
+            return "skipped", "no MCP clients detected on this machine"
+
     if options.dry_run:
-        return "ok", f"dry-run: would configure {', '.join(options.clients)}"
-    argv = [state["venv_python"], "-m", "tbmcp", "setup", *options.clients]
+        how = "detected" if detected else "requested"
+        return "ok", f"dry-run: would configure {', '.join(clients)} ({how})"
+
+    argv = [state["venv_python"], "-m", "tbmcp", "setup", *clients]
     if options.toolsets:
         argv += ["--toolsets", options.toolsets]
     status, output = run(argv)
     if status != 0:
         return "failed", output.strip() or "client setup failed"
-    return "ok", output.strip() or f"configured {', '.join(options.clients)}"
+    return "ok", output.strip() or f"configured {', '.join(clients)}"
 
 
 def _step_verify(options: Options, state: dict, run: Runner) -> tuple[str, str]:
@@ -571,7 +611,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--python", help="interpreter to build the environment with")
     parser.add_argument("--venv", type=pathlib.Path, help="where to put the environment")
-    parser.add_argument("--clients", help="comma separated; default: auto-detect")
+    parser.add_argument(
+        "--clients", help="comma separated; default: auto-detect installed clients"
+    )
     parser.add_argument("--toolsets", help="passed through to setup")
     parser.add_argument("--source", help=f"install from here (default: {GIT_SOURCE})")
     parser.add_argument("--skip-addon", action="store_true")

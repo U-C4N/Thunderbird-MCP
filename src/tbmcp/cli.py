@@ -256,6 +256,20 @@ def cmd_setup(args: argparse.Namespace) -> int:
     )
 
 
+def cmd_detect_clients(args: argparse.Namespace) -> int:
+    """A machine-readable list of installed clients — for `bootstrap` to shell out to.
+
+    `bootstrap.py` may not import from this package at all, so it cannot call
+    `clients.installed_clients()` directly; it spawns the venv's interpreter and
+    reads this command's stdout instead. Plain `print(json.dumps(...))` keeps that
+    parse trivial.
+    """
+    from .clients import installed_clients
+
+    print(json.dumps(installed_clients()))
+    return 0
+
+
 def cmd_tools(args: argparse.Namespace) -> int:
     """List the tools that would be registered — useful when writing allowlists."""
     from .server import build_server
@@ -396,6 +410,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     setup.set_defaults(func=cmd_setup)
 
+    detect = subparsers.add_parser(
+        "detect-clients", help="list installed MCP clients on this machine, as JSON"
+    )
+    detect.set_defaults(func=cmd_detect_clients)
+
     tools = subparsers.add_parser("tools", help="list the tools that would be registered")
     add_common(tools)
     tools.add_argument("--json", action="store_true")
@@ -404,7 +423,9 @@ def build_parser() -> argparse.ArgumentParser:
     boot = subparsers.add_parser("bootstrap", help="install, repair, register, verify")
     boot.add_argument("--python")
     boot.add_argument("--venv")
-    boot.add_argument("--clients")
+    boot.add_argument(
+        "--clients", help="comma separated; default: auto-detect installed clients"
+    )
     boot.add_argument("--toolsets")
     boot.add_argument("--source")
     boot.add_argument("--skip-addon", action="store_true")

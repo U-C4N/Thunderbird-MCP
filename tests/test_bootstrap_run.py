@@ -61,6 +61,13 @@ class Recorder:
         argv = list(argv)
         self.calls.append(argv)
         interpreter = argv[0] if argv else None
+        if argv[1:] == ["-m", "tbmcp", "detect-clients"]:
+            if interpreter != self.venv_python:
+                raise AssertionError(
+                    f"detect-clients ran under {interpreter!r}, expected the venv's "
+                    f"python {self.venv_python!r}"
+                )
+            return 0, json.dumps([])
         if "-c" in argv:
             source = argv[argv.index("-c") + 1]
             if "sqlite3" in source:
@@ -214,6 +221,82 @@ def test_clients_step_shells_out_with_requested_clients(tmp_path):
 
     assert status == "ok"
     assert calls == [[venv_python, "-m", "tbmcp", "setup", "claude-code", "codex"]]
+
+
+# ------------------------------------------------------------ auto-detected clients
+
+
+def test_clients_step_detects_and_registers_when_none_requested(tmp_path):
+    """The headline promise: no `--clients` still registers whatever is installed."""
+    calls: list[list[str]] = []
+
+    def run(argv):
+        argv = list(argv)
+        calls.append(argv)
+        if argv[-1] == "detect-clients":
+            return 0, json.dumps(["claude-code", "codex"])
+        return 0, ""
+
+    venv_python = str(tmp_path / "venv" / "Scripts" / "python.exe")
+    status, detail = _step_clients(Options(dry_run=False), {"venv_python": venv_python}, run)
+
+    assert status == "ok"
+    assert "claude-code" in detail and "codex" in detail
+    assert calls == [
+        [venv_python, "-m", "tbmcp", "detect-clients"],
+        [venv_python, "-m", "tbmcp", "setup", "claude-code", "codex"],
+    ]
+
+
+def test_clients_step_skips_not_ok_when_nothing_detected(tmp_path):
+    """No `--clients` and nothing found must read as `skipped`, never `ok`."""
+
+    def run(argv):
+        argv = list(argv)
+        if argv[-1] == "detect-clients":
+            return 0, json.dumps([])
+        raise AssertionError(f"nothing was detected; must not register anyway: {argv}")
+
+    venv_python = str(tmp_path / "venv" / "Scripts" / "python.exe")
+    status, detail = _step_clients(Options(dry_run=False), {"venv_python": venv_python}, run)
+
+    assert status == "skipped"
+    assert status != "ok"
+    assert "no" in detail.lower() and "detect" in detail.lower()
+
+
+def test_clients_step_dry_run_may_detect_but_never_registers(tmp_path):
+    calls: list[list[str]] = []
+
+    def run(argv):
+        argv = list(argv)
+        calls.append(argv)
+        if argv[-1] == "detect-clients":
+            return 0, json.dumps(["claude-code"])
+        raise AssertionError(f"--dry-run must never register anything: {argv}")
+
+    venv_python = str(tmp_path / "venv" / "Scripts" / "python.exe")
+    status, detail = _step_clients(Options(dry_run=True), {"venv_python": venv_python}, run)
+
+    assert status == "ok"
+    assert "claude-code" in detail
+    assert calls == [[venv_python, "-m", "tbmcp", "detect-clients"]]
+
+
+def test_clients_step_with_explicit_clients_skips_detection_entirely(tmp_path):
+    """An explicit `--clients` must register exactly that, with no detection call at all."""
+
+    def run(argv):
+        argv = list(argv)
+        if argv[-1] == "detect-clients":
+            raise AssertionError("explicit --clients must not trigger detection")
+        return 0, "configured"
+
+    venv_python = str(tmp_path / "venv" / "Scripts" / "python.exe")
+    options = Options(dry_run=False, clients=("zed",))
+    status, _detail = _step_clients(options, {"venv_python": venv_python}, run)
+
+    assert status == "ok"
 
 
 def test_verify_step_shells_out_to_doctor_json(tmp_path):

@@ -364,6 +364,10 @@ def _with_backup(note: str, backup: Path | None) -> str:
 # ---------------------------------------------------------------- Claude Code
 
 
+def _claude_code_path() -> Path:
+    return Path.home() / ".claude.json"
+
+
 def _claude_code(entry: dict[str, Any], ctx: Ctx) -> Outcome:
     """`claude mcp add-json` for user scope; `.mcp.json` for project scope.
 
@@ -381,7 +385,7 @@ def _claude_code(entry: dict[str, Any], ctx: Ctx) -> Outcome:
             note="checked in with the project",
         )
 
-    path = Path.home() / ".claude.json"
+    path = _claude_code_path()
     current = (_peek_json(path).get("mcpServers") or {}).get(SERVER_NAME)
     payload = json.dumps(entry, ensure_ascii=False, separators=(",", ":"))
     command = f"claude mcp add-json {SERVER_NAME} '{payload}' --scope user"
@@ -568,28 +572,40 @@ def _app_data(*parts: str) -> Path:
     return base.joinpath(*parts)
 
 
+def _claude_desktop_path() -> Path:
+    return _app_data("Claude", "claude_desktop_config.json")
+
+
 def _claude_desktop(entry: dict[str, Any], ctx: Ctx) -> Outcome:
-    path = _app_data("Claude", "claude_desktop_config.json")
+    path = _claude_desktop_path()
     note = "" if ctx.scope == "user" else "no project scope here; wrote the user config"
     return _apply_json("claude-desktop", path, "mcpServers", entry, ctx, note=note)
 
 
+def _cursor_path() -> Path:
+    return Path.home() / ".cursor" / "mcp.json"
+
+
 def _cursor(entry: dict[str, Any], ctx: Ctx) -> Outcome:
-    path = (
-        Path.cwd() / ".cursor" / "mcp.json"
-        if ctx.scope == "project"
-        else Path.home() / ".cursor" / "mcp.json"
-    )
+    path = Path.cwd() / ".cursor" / "mcp.json" if ctx.scope == "project" else _cursor_path()
     return _apply_json("cursor", path, "mcpServers", entry, ctx)
 
 
+def _gemini_path() -> Path:
+    return Path.home() / ".gemini" / "settings.json"
+
+
 def _gemini(entry: dict[str, Any], ctx: Ctx) -> Outcome:
-    path = (
-        Path.cwd() / ".gemini" / "settings.json"
-        if ctx.scope == "project"
-        else Path.home() / ".gemini" / "settings.json"
-    )
+    path = Path.cwd() / ".gemini" / "settings.json" if ctx.scope == "project" else _gemini_path()
     return _apply_json("gemini", path, "mcpServers", entry, ctx)
+
+
+def _zed_path() -> Path:
+    return (
+        _app_data("Zed", "settings.json")
+        if sys.platform == "win32"
+        else Path.home() / ".config" / "zed" / "settings.json"
+    )
 
 
 def _zed(entry: dict[str, Any], ctx: Ctx) -> Outcome:
@@ -598,13 +614,13 @@ def _zed(entry: dict[str, Any], ctx: Ctx) -> Outcome:
     Zed ships `settings.json` as a commented template and has no CLI for this, so the
     comment guard nearly always fires. That is the right outcome, not a shortcoming.
     """
-    path = (
-        _app_data("Zed", "settings.json")
-        if sys.platform == "win32"
-        else Path.home() / ".config" / "zed" / "settings.json"
-    )
+    path = _zed_path()
     note = "" if ctx.scope == "user" else "context_servers is user-wide; wrote the user config"
     return _apply_json("zed", path, "context_servers", entry, ctx, note=note)
+
+
+def _vscode_user_path() -> Path:
+    return _app_data("Code", "User", "mcp.json")
 
 
 def _vscode(entry: dict[str, Any], ctx: Ctx) -> Outcome:
@@ -612,7 +628,7 @@ def _vscode(entry: dict[str, Any], ctx: Ctx) -> Outcome:
     if ctx.scope == "project":
         return _apply_json("vscode", Path.cwd() / ".vscode" / "mcp.json", "servers", entry, ctx)
 
-    path = _app_data("Code", "User", "mcp.json")
+    path = _vscode_user_path()
     payload = json.dumps({"name": SERVER_NAME, **entry}, ensure_ascii=False, separators=(",", ":"))
     current = (_peek_json(path).get("servers") or {}).get(SERVER_NAME)
     if current == entry:
@@ -694,6 +710,31 @@ def _print_report(plan: _Plan, ctx: Ctx) -> None:
 
 
 # ------------------------------------------------------------------ entry point
+
+
+def installed_clients() -> list[str]:
+    """Which of `CLIENTS` actually look present on this machine, in `CLIENTS` order.
+
+    "Present" is judged from the same locations the writers themselves use, on the
+    theory that whatever the writer would touch is also good evidence the client
+    exists — no new paths are invented here. `claude-code` and `codex` are judged by
+    their CLI being on PATH rather than by their config file: both write that file
+    lazily, on first `add`, so a fresh install with the CLI present but never yet
+    used would otherwise read as absent. Every other client here is a GUI app whose
+    installer is what creates its config file or directory, so that file or its
+    parent directory existing is the best signal available without something
+    OS-specific like querying an app registry.
+    """
+    checks: dict[str, bool] = {
+        "claude-code": shutil.which("claude") is not None or _claude_code_path().exists(),
+        "codex": shutil.which("codex") is not None or _codex_home().exists(),
+        "claude-desktop": _claude_desktop_path().exists() or _claude_desktop_path().parent.exists(),
+        "cursor": _cursor_path().exists() or _cursor_path().parent.exists(),
+        "vscode": _vscode_user_path().exists() or _vscode_user_path().parent.exists(),
+        "gemini": _gemini_path().exists() or _gemini_path().parent.exists(),
+        "zed": _zed_path().exists() or _zed_path().parent.exists(),
+    }
+    return [client for client in CLIENTS if checks[client]]
 
 
 def resolve_clients(requested: Sequence[str] | None) -> list[str]:

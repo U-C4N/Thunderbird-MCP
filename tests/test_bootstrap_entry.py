@@ -53,6 +53,14 @@ def test_cli_exposes_the_subcommand():
     assert args.json is True
 
 
+def test_cli_exposes_detect_clients_for_bootstrap_to_shell_out_to():
+    from tbmcp.cli import build_parser
+
+    args = build_parser().parse_args(["detect-clients"])
+    assert args.command == "detect-clients"
+    assert args.func.__name__ == "cmd_detect_clients"
+
+
 def test_main_returns_nonzero_when_a_step_fails(monkeypatch, capsys):
     from tbmcp import bootstrap as module
 
