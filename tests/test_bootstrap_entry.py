@@ -96,3 +96,42 @@ def test_main_returns_nonzero_when_a_step_fails(monkeypatch, capsys):
     )
     assert module.main(["--json"]) == 1
     assert '"ok": false' in capsys.readouterr().out
+
+
+def test_main_exits_zero_for_a_clean_dry_run(monkeypatch, capsys):
+    """New breakage #2 from the final re-review: `ok` stays `false` for every dry run
+    on purpose (nothing was verified), but a dry run that hit no `failed` step did
+    everything it was asked to. An agent reading the exit code must not see that as a
+    failure the way it would see a real `Stopped.` run.
+    """
+    from tbmcp import bootstrap as module
+
+    steps = [module.Step("interpreter", "ok", 0.0, "chose python")]
+    monkeypatch.setattr(
+        module,
+        "bootstrap",
+        lambda options, **kw: module.Report(False, "1.2.0", None, steps, "python bootstrap.py"),
+    )
+    assert module.main(["--dry-run", "--json"]) == 0
+    out = capsys.readouterr().out
+    assert '"ok": false' in out  # the JSON contract itself must not regress
+
+
+def test_main_still_exits_nonzero_when_a_dry_run_step_failed(monkeypatch, capsys):
+    """The other half of #2: a dry run that genuinely hit a `failed` step keeps
+    exiting 1 — only a dry run that completed cleanly gets the exit-0 treatment.
+    """
+    from tbmcp import bootstrap as module
+
+    steps = [
+        module.Step("interpreter", "failed", 0.0, "no usable interpreter found"),
+    ]
+    monkeypatch.setattr(
+        module,
+        "bootstrap",
+        lambda options, **kw: module.Report(
+            False, "1.2.0", None, steps, "python bootstrap.py --python <path>"
+        ),
+    )
+    assert module.main(["--dry-run", "--json"]) == 1
+    assert '"ok": false' in capsys.readouterr().out

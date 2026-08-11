@@ -511,7 +511,7 @@ error console with a `[tbmcp]` prefix, and `tb_console` returns those lines as a
 ```bash
 uv venv && uv pip install -e ".[dev]"
 
-pytest                                  # 177 tests, no Thunderbird needed
+pytest                                  # 181 tests, no Thunderbird needed
 ruff check . && ruff format --check .
 python tools/check_consistency.py       # do all three layers still agree?
 python tools/build_xpi.py build         # build the add-on package

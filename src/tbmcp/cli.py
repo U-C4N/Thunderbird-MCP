@@ -109,10 +109,17 @@ def _doctor_ok(report: dict) -> bool:
     Both the direct daemon status *and* the `tb_status` tool call (routed through the
     real MCP tool-calling machinery, the same path a client uses) have to say
     `connected`. Checking only one would let the other silently regress unnoticed.
+
+    Exception: when the `admin` toolset was deselected, `tb_status` was never
+    registered at all — `report["tbStatusCall"]` then carries `skipped`, not
+    `connected` or `error`. That is a supported configuration, not a broken chain,
+    so it must not sink `ok` the way a genuine dispatch failure would.
     """
     bridge_state = report.get("bridge")
     tool_call = report.get("tbStatusCall")
     bridge_ok = isinstance(bridge_state, dict) and bool(bridge_state.get("connected"))
+    if isinstance(tool_call, dict) and tool_call.get("skipped"):
+        return bridge_ok
     tool_ok = isinstance(tool_call, dict) and bool(tool_call.get("connected"))
     return bridge_ok and tool_ok
 
@@ -177,9 +184,18 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         # connection already established above; does not spawn a second daemon.
         set_shared_bridge(bridge)
         try:
-            mcp = build_server(settings)
-            result = await mcp.call_tool("tb_status", {})
-            report["tbStatusCall"] = result.structured_content
+            mcp = build_server(settings, bridge=bridge)
+            if "admin" not in settings.toolsets:
+                # tb_status lives in the admin toolset. Calling it anyway would just
+                # raise `ToolError: Unknown tool: tb_status` — indistinguishable, to a
+                # naive check, from the tool genuinely failing. Record the real reason
+                # instead of dispatching a call we already know cannot succeed.
+                report["tbStatusCall"] = {
+                    "skipped": "admin toolset not selected; tb_status is not registered"
+                }
+            else:
+                result = await mcp.call_tool("tb_status", {})
+                report["tbStatusCall"] = result.structured_content
         except Exception as exc:
             report["tbStatusCall"] = {"error": f"{type(exc).__name__}: {exc}"}
         finally:
@@ -254,7 +270,9 @@ def _print_doctor(report: dict) -> None:
             line("app", f"{app.get('name')} {app.get('version')}")
 
     tool_call = report.get("tbStatusCall") or {}
-    if tool_call.get("error"):
+    if tool_call.get("skipped"):
+        line("tb_status tool call", f"not checked: {tool_call['skipped']}")
+    elif tool_call.get("error"):
         line("tb_status tool call", f"ERROR: {tool_call['error']}")
     else:
         line("tb_status tool call", "connected" if tool_call.get("connected") else "not connected")

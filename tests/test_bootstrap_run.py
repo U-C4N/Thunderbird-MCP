@@ -196,6 +196,34 @@ def test_dry_run_is_never_reported_ok(tmp_path):
     assert "--dry-run" not in report.next_command
 
 
+def test_clean_dry_run_text_does_not_read_as_stopped(tmp_path):
+    """New breakage #2: `to_text()` used to print "Stopped. Next: ..." for *every*
+    `ok: false` report, so a dry run that did exactly what was asked looked
+    byte-for-byte like a genuine failure in the human-readable output too.
+    """
+    recorder = Recorder(_venv_python_path(tmp_path / "venv"))
+    report = bootstrap(Options(venv=tmp_path / "venv", dry_run=True), run=recorder.run)
+    assert report.ok is False
+    assert not any(step.status == "failed" for step in report.steps)
+    text = report.to_text()
+    assert "Stopped." not in text
+    assert report.next_command in text
+
+
+def test_failed_dry_run_text_still_says_stopped(tmp_path):
+    """The other half: a dry run that genuinely hit a `failed` step must still read
+    as stopped, not as a clean dry-run completion."""
+
+    def run(argv):
+        return 1, "no usable interpreter"
+
+    report = bootstrap(Options(venv=tmp_path / "venv", dry_run=True), run=run)
+    assert report.ok is False
+    assert any(step.status == "failed" for step in report.steps)
+    text = report.to_text()
+    assert "Stopped." in text
+
+
 def test_real_run_reaching_the_end_is_reported_ok(tmp_path):
     """The flip side of the above: a run that is *not* a dry run, and that hits no
     `failed` step, must still be able to report `ok: true` — the dry-run fix must
@@ -441,6 +469,25 @@ def test_clients_step_says_it_could_not_check_when_detection_cannot_run(tmp_path
 
     assert status == "skipped"
     assert "no mcp clients detected" not in detail.lower()
+    assert "could not" in detail.lower()
+
+
+def test_clients_step_in_a_real_run_reports_a_crash_not_a_missing_venv(tmp_path):
+    """New breakage #5: by the time `clients` runs in a real (non-dry-run) bootstrap,
+    `venv` and `install` have already reported `ok` — a working venv necessarily
+    exists. If `detect-clients` still comes back unusable here, that is because it
+    crashed or produced junk, not because there was "no working venv to run it in
+    yet" (that phrasing is true only under `--dry-run`, before any venv is built).
+    """
+
+    def run(argv):
+        return 1, "Traceback (most recent call last): ... ImportError"
+
+    venv_python = str(tmp_path / "venv" / "Scripts" / "python.exe")
+    status, detail = _step_clients(Options(dry_run=False), {"venv_python": venv_python}, run)
+
+    assert status == "skipped"
+    assert "no working venv" not in detail.lower()
     assert "could not" in detail.lower()
 
 

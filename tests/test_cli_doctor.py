@@ -1,0 +1,206 @@
+"""Coverage for `cmd_doctor` and `_doctor_ok`.
+
+Before this file, neither had any test at all — the cli half of the C1 fix (the
+`verify` step's `doctor --json` really certifying a working chain) rested on
+inspection and manual runs alone. These tests fake the daemon/profile/server layer
+so the whole function runs without a real Thunderbird, and target the two things the
+final re-review flagged: `--no-start` must reach the *one* bridge `cmd_doctor` ever
+builds (new breakage #1), and a deselected `admin` toolset must not read as a broken
+chain (new breakage #4).
+"""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+import pytest
+
+from tbmcp.cli import _doctor_ok, build_parser, cmd_doctor
+
+# ------------------------------------------------------------------- _doctor_ok
+
+
+def test_doctor_ok_true_when_bridge_and_tool_call_both_connected():
+    report = {"bridge": {"connected": True}, "tbStatusCall": {"connected": True}}
+    assert _doctor_ok(report) is True
+
+
+def test_doctor_ok_false_when_bridge_is_not_connected():
+    report = {"bridge": {"connected": False}, "tbStatusCall": {"connected": True}}
+    assert _doctor_ok(report) is False
+
+
+def test_doctor_ok_false_when_tool_call_genuinely_errors():
+    report = {
+        "bridge": {"connected": True},
+        "tbStatusCall": {"error": "ToolError: Error executing tool tb_status: boom"},
+    }
+    assert _doctor_ok(report) is False
+
+
+def test_doctor_ok_true_when_admin_toolset_deselected_and_bridge_is_healthy():
+    """Item 4: `tb_status` only exists when `admin` is selected. Deselecting it is a
+    supported configuration, not a broken chain — `tbStatusCall` carries `skipped`
+    for exactly this case, and it must not sink `ok` the way a real dispatch
+    failure would.
+    """
+    report = {
+        "bridge": {"connected": True},
+        "tbStatusCall": {"skipped": "admin toolset not selected; tb_status is not registered"},
+    }
+    assert _doctor_ok(report) is True
+
+
+def test_doctor_ok_false_when_admin_deselected_but_bridge_is_not_connected():
+    """The skip excuses the missing tool check only — it must not also excuse a
+    genuinely disconnected bridge."""
+    report = {
+        "bridge": {"connected": False},
+        "tbStatusCall": {"skipped": "admin toolset not selected; tb_status is not registered"},
+    }
+    assert _doctor_ok(report) is False
+
+
+# ------------------------------------------------------------------- cmd_doctor
+
+
+@pytest.fixture
+def _clean_tbmcp_env(monkeypatch):
+    """`Settings.from_env()` reads these; strip them so the test's outcome depends
+    only on what it configures explicitly, not on this machine's shell."""
+    for var in (
+        "TBMCP_TOOLSETS",
+        "TBMCP_READ_ONLY",
+        "TBMCP_YOLO",
+        "TBMCP_UNSAFE_PREFS",
+        "TBMCP_SEND",
+        "TBMCP_PROFILE",
+        "TBMCP_TIMEOUT",
+        "TBMCP_NO_AUTOSTART",
+        "TBMCP_TOOLS",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+
+def _stub_common(monkeypatch, *, bridge_status: dict) -> tuple[list, list]:
+    """Fake every dependency `cmd_doctor` reaches for besides `Bridge`/`build_server`,
+    which each test fakes itself. Returns (created_bridges, build_server_calls).
+    """
+    created_bridges: list = []
+
+    class FakeBridge:
+        def __init__(self, *, profile_hint=None, autostart=True, default_timeout=30.0):
+            self.profile_hint = profile_hint
+            self.autostart = autostart
+            self.default_timeout = default_timeout
+            self.closed = False
+            created_bridges.append(self)
+
+        async def require_thunderbird(self, *, wait=0.0):
+            return dict(bridge_status)
+
+        async def status(self):
+            return dict(bridge_status)
+
+        async def close(self):
+            self.closed = True
+
+    monkeypatch.setattr("tbmcp.bridge.Bridge", FakeBridge)
+    monkeypatch.setattr("tbmcp.profile.list_profiles", lambda: [])
+    monkeypatch.setattr("tbmcp.profile.find_profile", lambda *_a, **_k: None)
+    monkeypatch.setattr("tbmcp.addon_install.summary", lambda: {})
+
+    from tbmcp.ipc import DaemonInfo
+
+    monkeypatch.setattr(DaemonInfo, "load", classmethod(lambda cls: None))
+
+    return created_bridges
+
+
+@pytest.mark.usefixtures("_clean_tbmcp_env")
+def test_no_start_reuses_the_one_bridge_and_never_autostarts_a_second(monkeypatch):
+    """Regression guard for new breakage #1 in the final re-review: `cmd_doctor`
+    built a deliberately non-autostarting `Bridge` for `--no-start`, then handed
+    `build_server` no bridge at all — `build_server` then constructed a *second*,
+    autostarting `Bridge` (`server.py:136`), silently defeating `--no-start` and
+    leaking the first connection. The fix is `build_server(settings, bridge=bridge)`.
+    This fails if that keyword argument regresses: reverting it makes
+    `build_server_calls == [None]` instead of `[created_bridges[0]]`.
+    """
+    created_bridges = _stub_common(monkeypatch, bridge_status={"connected": True})
+    build_server_calls: list = []
+
+    class FakeMCP:
+        async def call_tool(self, name, args):
+            return SimpleNamespace(structured_content={"connected": True})
+
+    def fake_build_server(settings, *, bridge=None):
+        build_server_calls.append(bridge)
+        return FakeMCP()
+
+    monkeypatch.setattr("tbmcp.server.build_server", fake_build_server)
+
+    args = build_parser().parse_args(["doctor", "--json", "--no-start", "--wait", "0"])
+    exit_code = cmd_doctor(args)
+
+    assert len(created_bridges) == 1, "cmd_doctor must construct exactly one Bridge"
+    assert created_bridges[0].autostart is False, (
+        "--no-start must reach the one bridge cmd_doctor builds"
+    )
+    assert build_server_calls == [created_bridges[0]], (
+        "build_server must reuse the already-established, non-autostarting bridge, "
+        "not default to constructing a fresh (autostarting) one"
+    )
+    assert created_bridges[0].closed is True, "the one bridge must be closed on the way out"
+    assert exit_code == 0
+
+
+@pytest.mark.usefixtures("_clean_tbmcp_env")
+def test_admin_toolset_deselected_does_not_dispatch_tb_status_and_still_reports_ok(monkeypatch):
+    """Item 4: with `admin` deselected, `tb_status` is not registered — dispatching
+    it anyway would just raise `ToolError: Unknown tool: tb_status`, indistinguishable
+    from a real failure to a naive check. `cmd_doctor` must recognise the deselection
+    up front and never even attempt the call, and the overall report must still be
+    `ok` when the bridge itself is healthy.
+    """
+    created_bridges = _stub_common(monkeypatch, bridge_status={"connected": True})
+    call_tool_invocations: list = []
+    build_server_settings: list = []
+
+    class FakeMCP:
+        async def call_tool(self, name, args):
+            call_tool_invocations.append(name)
+            return SimpleNamespace(structured_content={"connected": True})
+
+    def fake_build_server(settings, *, bridge=None):
+        build_server_settings.append(settings)
+        return FakeMCP()
+
+    monkeypatch.setattr("tbmcp.server.build_server", fake_build_server)
+
+    args = build_parser().parse_args(["doctor", "--json", "--toolsets", "mail"])
+    exit_code = cmd_doctor(args)
+
+    assert "admin" not in build_server_settings[0].toolsets
+    assert call_tool_invocations == [], (
+        "tb_status must never be dispatched when admin is deselected"
+    )
+    assert len(created_bridges) == 1
+    assert exit_code == 0
+
+
+@pytest.mark.usefixtures("_clean_tbmcp_env")
+def test_returns_nonzero_when_the_bridge_is_genuinely_not_connected(monkeypatch):
+    """Sanity check on the other side of item 4: a real problem must still fail."""
+    _stub_common(monkeypatch, bridge_status={"connected": False})
+
+    class FakeMCP:
+        async def call_tool(self, name, args):
+            return SimpleNamespace(structured_content={"connected": False})
+
+    monkeypatch.setattr("tbmcp.server.build_server", lambda settings, *, bridge=None: FakeMCP())
+
+    args = build_parser().parse_args(["doctor", "--json"])
+    exit_code = cmd_doctor(args)
+
+    assert exit_code == 1

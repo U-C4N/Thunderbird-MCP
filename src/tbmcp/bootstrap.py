@@ -395,7 +395,16 @@ class Report:
         for step in self.steps:
             lines.append(f"  {step.name:<14} {step.status:<10} {step.detail}".rstrip())
         lines.append("")
-        lines.append("Ready." if self.ok else f"Stopped. Next:  {self.next_command}")
+        if self.ok:
+            lines.append("Ready.")
+        elif any(step.status == "failed" for step in self.steps):
+            lines.append(f"Stopped. Next:  {self.next_command}")
+        else:
+            # `ok` is deliberately never `true` for a dry run (nothing was verified),
+            # but a dry run that hit no failed step did everything it was asked to —
+            # that is not "Stopped.", which would read as the same outcome as a real
+            # failure.
+            lines.append(f"Dry run complete; nothing was changed. Next:  {self.next_command}")
         return "\n".join(lines)
 
 
@@ -598,7 +607,21 @@ def _step_clients(options: Options, state: dict, run: Runner) -> tuple[str, str]
         detected = True
         found = _detected_clients(state["venv_python"], run)
         if found is None:
-            return "skipped", "could not run client detection (no working venv to run it in yet)"
+            if options.dry_run:
+                # No venv exists yet under --dry-run (`venv` reported `skipped`), so
+                # this could never have run in the first place.
+                return (
+                    "skipped",
+                    "could not run client detection (no working venv to run it in yet)",
+                )
+            # A real run only reaches here with a working, load-tested venv already
+            # in hand — `_detected_clients` returning `None` here means detect-clients
+            # itself crashed or produced output that could not be parsed, not that
+            # there was nothing to run it in.
+            return (
+                "skipped",
+                "could not run client detection (detect-clients crashed or produced no usable output)",
+            )
         clients = found
         if not clients:
             return (
@@ -630,10 +653,22 @@ def _step_verify(options: Options, state: dict, run: Runner) -> tuple[str, str]:
     """
     if options.dry_run:
         return "skipped", "dry-run: skipping post-install verification"
-    status, output = run([state["venv_python"], "-m", "tbmcp", "doctor", "--json"])
+    argv = [state["venv_python"], "-m", "tbmcp", "doctor", "--json"]
+    if options.toolsets:
+        argv += ["--toolsets", options.toolsets]
+    status, output = run(argv)
     payload = _json_field_report(output)
     if status != 0 or payload is None or not payload.get("ok"):
         return "failed", output.strip() or "doctor reported a problem"
+    tool_call = payload.get("tbStatusCall")
+    if isinstance(tool_call, dict) and tool_call.get("skipped"):
+        # A deselected `admin` toolset is a supported configuration, not a broken
+        # chain — `doctor`'s own `ok` already accounts for it (see `_doctor_ok`).
+        # Say so here too, rather than claiming a check that never ran.
+        return (
+            "ok",
+            "doctor: healthy (bridge connected; tb_status not checked — admin toolset not selected)",
+        )
     return "ok", "doctor: healthy (bridge connected, tb_status tool call verified)"
 
 
@@ -796,6 +831,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     )
     print(report.to_json() if args.json_out else report.to_text())
+    if args.dry_run:
+        # `ok` stays `false` for every dry run on purpose (see `Report.to_json`'s
+        # docstring-equivalent note in `bootstrap()`) — nothing was verified. But a
+        # dry run that completed every step it was asked to is not a failure an agent
+        # should see reflected in the exit code; only a step that actually failed
+        # should do that.
+        return 1 if any(step.status == "failed" for step in report.steps) else 0
     return 0 if report.ok else 1
 
 
