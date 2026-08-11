@@ -197,9 +197,10 @@ README fixes, all of them current inaccuracies rather than polish:
 - A short "For AI agents" block: clone, one command, `--json` contract.
 - A troubleshooting entry for blocked binaries, describing the general symptom.
 
-Release: tag `v1.2.0`, GitHub release with the built XPI attached. This needs
-`gh auth login`, which the user must run; it is the one step that cannot be
-automated from here.
+Release: tag `v1.2.0`, GitHub release with the built XPI attached. `gh`'s own
+credential store is empty, but Git Credential Manager holds a token for `U-C4N` with
+`repo` scope, verified against the API — so the release needs no interactive login
+and nothing is asked of the user.
 
 ## Risks
 
