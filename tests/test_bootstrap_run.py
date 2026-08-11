@@ -480,7 +480,7 @@ def test_verify_step_fails_when_doctor_exits_zero_but_reports_not_ok(tmp_path):
         return 0, json.dumps({"ok": False, "bridge": {"connected": False}})
 
     venv_python = str(tmp_path / "venv" / "Scripts" / "python.exe")
-    status, detail = _step_verify(Options(dry_run=False), {"venv_python": venv_python}, run)
+    status, _detail = _step_verify(Options(dry_run=False), {"venv_python": venv_python}, run)
 
     assert status == "failed"
     assert status != "ok"
