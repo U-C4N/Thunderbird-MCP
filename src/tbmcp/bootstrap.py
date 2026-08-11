@@ -8,8 +8,11 @@ of it. A subcommand cannot repair a state in which its own package will not load
 from __future__ import annotations
 
 import json
+import os
 import pathlib
+import shutil
 import subprocess
+import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
@@ -215,3 +218,78 @@ def write_constraints(venv_dir: pathlib.Path, repairs: Sequence[Repair]) -> path
         encoding="utf-8",
     )
     return path
+
+
+class BootstrapError(RuntimeError):
+    """Something bootstrap cannot repair on its own."""
+
+
+# Not an exclusion list. A uv-managed interpreter is fine on a machine with no
+# enforcing policy, and dropping it outright would break the common case to serve
+# the rare one; it just goes to the back of the queue.
+UV_ROOT_MARKERS = ("uv/python", "uv\\python")
+
+_LOAD_TEST = """
+import json, sqlite3, ssl, ctypes, sysconfig
+print(json.dumps({"ok": True, "version": sysconfig.get_python_version()}))
+"""
+
+
+def rank_interpreters(paths: Sequence[str]) -> list[str]:
+    seen: dict[str, None] = {}
+    for path in paths:
+        seen.setdefault(path, None)
+    ordered = list(seen)
+    return sorted(ordered, key=lambda path: any(m in path.lower() for m in UV_ROOT_MARKERS))
+
+
+def interpreter_ok(python: str, *, run: Runner = run_capture) -> bool:
+    """Can this interpreter actually load the extension modules the server needs?
+
+    Signatures and OS policy queries both lie — one is platform-specific and the
+    other reports intent rather than outcome. Loading the modules does not.
+    """
+    status, output = run([python, "-c", _LOAD_TEST])
+    return status == 0 and '"ok": true' in output.lower()
+
+
+def candidate_interpreters() -> list[str]:
+    candidates = [sys.executable]
+    if os.name == "nt":
+        for minor in ("3.13", "3.12", "3.11"):
+            candidates.append(f"py -{minor}")
+        for minor in ("314", "313", "312", "311"):
+            candidates.append(rf"C:\Python{minor}\python.exe")
+    for name in ("python3.13", "python3.12", "python3.11", "python3", "python"):
+        found = shutil.which(name)
+        if found:
+            candidates.append(found)
+    return rank_interpreters([c for c in candidates if c])
+
+
+def choose_interpreter(
+    explicit: str | None = None,
+    *,
+    run: Runner = run_capture,
+    candidates: Sequence[str] | None = None,
+) -> str:
+    """The first interpreter that passes the load test.
+
+    An explicit `--python` is tried first but not trusted: being asked for is not
+    evidence that it works, and a silent fallback would hide the very failure the
+    caller is trying to diagnose.
+    """
+    if explicit is not None:
+        if interpreter_ok(explicit, run=run):
+            return explicit
+        raise BootstrapError(
+            f"{explicit} cannot load sqlite3/ssl/ctypes. Pick another with --python."
+        )
+    pool = list(candidates) if candidates is not None else candidate_interpreters()
+    for candidate in pool:
+        if interpreter_ok(candidate, run=run):
+            return candidate
+    raise BootstrapError(
+        f"none of the {len(pool)} interpreters found can load sqlite3/ssl/ctypes. "
+        "Install python.org CPython 3.11+ and re-run with --python."
+    )
