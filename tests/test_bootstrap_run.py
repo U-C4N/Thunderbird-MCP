@@ -21,8 +21,17 @@ from tbmcp.bootstrap import (
 )
 from tbmcp.bootstrap import venv_python as _venv_python_path
 
-STEPS = ["interpreter", "venv", "install", "imports", "binaries", "launcher",
-         "addon", "clients", "verify"]
+STEPS = [
+    "interpreter",
+    "venv",
+    "install",
+    "imports",
+    "binaries",
+    "launcher",
+    "addon",
+    "clients",
+    "verify",
+]
 
 
 @pytest.fixture(autouse=True)
@@ -205,9 +214,7 @@ def test_real_run_reaching_the_end_is_reported_ok(tmp_path):
                 return 0, json.dumps({"ok": True})
         return 0, json.dumps({"ok": True})
 
-    report = bootstrap(
-        Options(venv=tmp_path / "venv", dry_run=False, skip_addon=True), run=run
-    )
+    report = bootstrap(Options(venv=tmp_path / "venv", dry_run=False, skip_addon=True), run=run)
     assert report.ok is True
     assert report.next_command is None
 
@@ -352,7 +359,7 @@ def test_detected_clients_returns_empty_tuple_on_a_genuine_empty_list():
 
 def test_detected_clients_skips_junk_lines_before_the_json():
     def run(argv):
-        return 0, "warning: something noisy\nDeprecationWarning: whatever\n[\"zed\"]"
+        return 0, 'warning: something noisy\nDeprecationWarning: whatever\n["zed"]'
 
     assert _detected_clients("python", run) == ("zed",)
 

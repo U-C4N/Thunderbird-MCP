@@ -29,7 +29,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "anyio>=4", "ruff>=0.9"]
+# ruff is pinned, not floored: it is a formatter, and an unpinned formatter turns
+# every upstream release into a CI failure on code nobody touched. 0.15.0 is also
+# the newest build that loads under this machine's Application Control policy, so a
+# floor here would mean the developer and CI silently disagree about formatting.
+dev = ["pytest>=8", "anyio>=4", "ruff==0.15.0"]
 
 [project.scripts]
 # A real .exe shim on Windows: spawnable directly by Claude Code (Node) and

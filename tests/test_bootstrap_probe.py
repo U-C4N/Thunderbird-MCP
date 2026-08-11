@@ -15,8 +15,7 @@ from tbmcp.bootstrap import ImportFailure, probe_import
 
 BLOCKED_PATH = r"C:\venv\Lib\site-packages\_cffi_backend.cp314-win_amd64.pyd"
 BLOCKED_MESSAGE = (
-    "DLL load failed while importing _cffi_backend: "
-    "Uygulama Denetimi ilkesi bu dosyayi engelledi."
+    "DLL load failed while importing _cffi_backend: Uygulama Denetimi ilkesi bu dosyayi engelledi."
 )
 BLOCKED = json.dumps(
     {"ok": False, "name": "_cffi_backend", "path": BLOCKED_PATH, "message": BLOCKED_MESSAGE}

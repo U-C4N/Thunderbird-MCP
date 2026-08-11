@@ -460,9 +460,7 @@ def build_parser() -> argparse.ArgumentParser:
     boot = subparsers.add_parser("bootstrap", help="install, repair, register, verify")
     boot.add_argument("--python")
     boot.add_argument("--venv")
-    boot.add_argument(
-        "--clients", help="comma separated; default: auto-detect installed clients"
-    )
+    boot.add_argument("--clients", help="comma separated; default: auto-detect installed clients")
     boot.add_argument("--toolsets")
     boot.add_argument("--source")
     boot.add_argument("--skip-addon", action="store_true")

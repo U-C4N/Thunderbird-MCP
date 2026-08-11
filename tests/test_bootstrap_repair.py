@@ -27,8 +27,12 @@ class FakeEnv:
         if "-c" in argv and "import json, sys" in argv[argv.index("-c") + 1]:
             if self._blocked():
                 return 0, json.dumps(
-                    {"ok": False, "name": "_cffi_backend", "path": "/x/_cffi_backend.pyd",
-                     "message": "DLL load failed while importing _cffi_backend: engellendi"}
+                    {
+                        "ok": False,
+                        "name": "_cffi_backend",
+                        "path": "/x/_cffi_backend.pyd",
+                        "message": "DLL load failed while importing _cffi_backend: engellendi",
+                    }
                 )
             return 0, json.dumps({"ok": True})
         if "packages_distributions" in " ".join(argv):
@@ -39,7 +43,9 @@ class FakeEnv:
             spec = argv[-1]
             self.installs.append(spec)
             ceiling = spec.split("<")[1]
-            lower = [v for v in self.versions if self.versions.index(v) > self.versions.index(ceiling)]
+            lower = [
+                v for v in self.versions if self.versions.index(v) > self.versions.index(ceiling)
+            ]
             if not lower:
                 return 1, "ERROR: no matching distribution"
             self.current = lower[0]
@@ -116,8 +122,12 @@ class TwoDistFakeEnv:
                 return 0, json.dumps({"ok": True})
             module = self.state[blocked]["module"]
             return 0, json.dumps(
-                {"ok": False, "name": module, "path": f"/x/{module}.pyd",
-                 "message": f"DLL load failed while importing {module}: engellendi"}
+                {
+                    "ok": False,
+                    "name": module,
+                    "path": f"/x/{module}.pyd",
+                    "message": f"DLL load failed while importing {module}: engellendi",
+                }
             )
         if "packages_distributions" in " ".join(argv):
             module = argv[-1]
@@ -180,8 +190,12 @@ class ChainFakeEnv:
                 return 0, json.dumps({"ok": True})
             module = self.modules[blocked]
             return 0, json.dumps(
-                {"ok": False, "name": module, "path": f"/x/{module}.pyd",
-                 "message": f"DLL load failed while importing {module}: engellendi"}
+                {
+                    "ok": False,
+                    "name": module,
+                    "path": f"/x/{module}.pyd",
+                    "message": f"DLL load failed while importing {module}: engellendi",
+                }
             )
         if "packages_distributions" in " ".join(argv):
             module = argv[-1]

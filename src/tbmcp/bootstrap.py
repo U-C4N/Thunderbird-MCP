@@ -203,8 +203,11 @@ def repair_imports(
         if len(handled) >= max_dists:
             floor = installed_version(python, dist, run=run)
             return repairs, ImportFailure(
-                module=failure.module, path=failure.path, message=failure.message,
-                dist=dist, floor=floor,
+                module=failure.module,
+                path=failure.path,
+                message=failure.message,
+                dist=dist,
+                floor=floor,
             )
         handled.add(dist)
 
@@ -217,9 +220,7 @@ def repair_imports(
         for _attempt in range(max_attempts):
             if current is None:
                 break
-            status, _output = run(
-                [python, "-m", "pip", "install", "--quiet", f"{dist}<{current}"]
-            )
+            status, _output = run([python, "-m", "pip", "install", "--quiet", f"{dist}<{current}"])
             if status != 0:
                 break
             current = installed_version(python, dist, run=run)
@@ -227,7 +228,9 @@ def repair_imports(
             if failure is None:
                 resolved_dist = None
                 break
-            resolved_dist = distribution_for(python, failure.module, run=run) if failure.module else None
+            resolved_dist = (
+                distribution_for(python, failure.module, run=run) if failure.module else None
+            )
             if resolved_dist != dist:
                 break
 
@@ -236,8 +239,11 @@ def repair_imports(
 
         if failure is not None and failure.module and resolved_dist == dist:
             return repairs, ImportFailure(
-                module=failure.module, path=failure.path, message=failure.message,
-                dist=dist, floor=current,
+                module=failure.module,
+                path=failure.path,
+                message=failure.message,
+                dist=dist,
+                floor=current,
             )
 
     return repairs, None
@@ -296,9 +302,11 @@ def candidate_interpreters(*, run: Runner = run_capture) -> list[str]:
         py_launcher = shutil.which("py")
         if py_launcher:
             for minor in ("3.13", "3.12", "3.11"):
-                status, output = run([py_launcher, f"-{minor}", "-c", "import sys; print(sys.executable)"])
+                status, output = run(
+                    [py_launcher, f"-{minor}", "-c", "import sys; print(sys.executable)"]
+                )
                 if status == 0:
-                    resolved = output.strip().split('\n')[-1]
+                    resolved = output.strip().split("\n")[-1]
                     if resolved:
                         candidates.append(resolved)
         for minor in ("314", "313", "312", "311"):
@@ -448,7 +456,10 @@ def _step_venv(options: Options, state: dict, run: Runner) -> tuple[str, str]:
     if status != 0:
         return "failed", f"could not create venv at {venv_dir}: {output.strip()}"
     if not interpreter_ok(str(python_path), run=run):
-        return "failed", f"created venv at {venv_dir}, but its python cannot load sqlite3/ssl/ctypes"
+        return (
+            "failed",
+            f"created venv at {venv_dir}, but its python cannot load sqlite3/ssl/ctypes",
+        )
     state["venv_python"] = str(python_path)
     return "ok", f"created venv at {venv_dir}"
 
@@ -486,7 +497,10 @@ def _step_imports(options: Options, state: dict, run: Runner) -> tuple[str, str]
     state["import_failure"] = failure
     if failure is None:
         return "ok", "tbmcp.server imports cleanly"
-    return "skipped", f"{failure.module or 'tbmcp.server'} failed to import; handing off to binaries"
+    return (
+        "skipped",
+        f"{failure.module or 'tbmcp.server'} failed to import; handing off to binaries",
+    )
 
 
 def _step_binaries(options: Options, state: dict, run: Runner) -> tuple[str, str]:
@@ -587,7 +601,10 @@ def _step_clients(options: Options, state: dict, run: Runner) -> tuple[str, str]
             return "skipped", "could not run client detection (no working venv to run it in yet)"
         clients = found
         if not clients:
-            return "skipped", "detect-clients ran and found no MCP clients installed on this machine"
+            return (
+                "skipped",
+                "detect-clients ran and found no MCP clients installed on this machine",
+            )
 
     if options.dry_run:
         how = "detected" if detected else "requested"
@@ -758,9 +775,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--python", help="interpreter to build the environment with")
     parser.add_argument("--venv", type=pathlib.Path, help="where to put the environment")
-    parser.add_argument(
-        "--clients", help="comma separated; default: auto-detect installed clients"
-    )
+    parser.add_argument("--clients", help="comma separated; default: auto-detect installed clients")
     parser.add_argument("--toolsets", help="passed through to setup")
     parser.add_argument("--source", help=f"install from here (default: {GIT_SOURCE})")
     parser.add_argument("--skip-addon", action="store_true")
