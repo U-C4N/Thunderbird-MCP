@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import pathlib
+import sys
 
 import pytest
 
@@ -42,10 +43,16 @@ def test_runnable_shim_is_accepted(monkeypatch, shim):
 
 
 def test_server_command_falls_back_to_module(monkeypatch):
+    """The fallback names this interpreter, whatever it happens to be called.
+
+    Matching the tail against a list of plausible names is what a Windows-only
+    author writes: CI runs on `python3.13`, and the suffix list quietly decided
+    the three-platform claim was false.
+    """
     monkeypatch.setattr(clients, "_console_script", lambda: None)
     command, args = clients.server_command(Settings())
     assert args[:2] == ["-m", "tbmcp"]
-    assert command.endswith(("python", "python.exe", "python3"))
+    assert command == str(pathlib.Path(sys.executable).resolve())
 
 
 def test_console_script_returns_none_when_all_unrunnable(monkeypatch, tmp_path):
