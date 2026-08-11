@@ -177,7 +177,18 @@ def _launch(exe: pathlib.Path, extra_args: list[str], profile: ThunderbirdProfil
     argv = [str(exe), *extra_args]
     if profile is not None:
         argv += ["-profile", str(profile.path)]
-    kwargs: dict = {"stdin": subprocess.DEVNULL, "close_fds": True}
+    # All three streams, not just stdin. Thunderbird outlives us on purpose, so an
+    # inherited stdout keeps the caller's pipe open long after `install-addon` has
+    # finished — an agent or CI step capturing our output waits for the mail client
+    # to be closed, and its own timeout cannot rescue it, because killing us leaves
+    # the grandchild holding the pipe. `close_fds` does not cover the std handles;
+    # they have to be redirected explicitly, as the daemon spawn in bridge.py does.
+    kwargs: dict = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "close_fds": True,
+    }
     if sys.platform == "win32":
         kwargs["creationflags"] = 0x00000008 | 0x00000200  # DETACHED | NEW_GROUP
     else:
