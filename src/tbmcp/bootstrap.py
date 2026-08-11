@@ -8,6 +8,7 @@ of it. A subcommand cannot repair a state in which its own package will not load
 from __future__ import annotations
 
 import json
+import pathlib
 import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -90,3 +91,123 @@ def probe_import(
             message=payload.get("message") or "",
         )
     return ImportFailure(module="", path=None, message=output.strip())
+
+
+_DIST_OF = """
+import json
+import sys
+from importlib.metadata import packages_distributions
+dists = packages_distributions().get(sys.argv[1]) or []
+print(json.dumps({"dist": dists[0] if dists else None}))
+"""
+
+_VERSION_OF = """
+import json
+import sys
+from importlib.metadata import PackageNotFoundError, version
+try:
+    print(json.dumps({"version": version(sys.argv[1])}))
+except PackageNotFoundError:
+    print(json.dumps({"version": None}))
+"""
+
+
+@dataclass(frozen=True)
+class Repair:
+    """A distribution walked down from one version to another to unblock an import."""
+
+    dist: str
+    from_version: str
+    to_version: str
+
+
+def _json_field(output: str, key: str):
+    """Pull `key` out of the last JSON object line in subprocess output."""
+    for line in reversed(output.splitlines()):
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                return json.loads(line).get(key)
+            except ValueError:
+                continue
+    return None
+
+
+def distribution_for(python: str, module: str, *, run: Runner = run_capture) -> str | None:
+    """Which installed distribution provides `module`."""
+    _status, output = run([python, "-c", _DIST_OF, module])
+    return _json_field(output, "dist")
+
+
+def installed_version(python: str, dist: str, *, run: Runner = run_capture) -> str | None:
+    """The version of `dist` currently installed under `python`, or `None`."""
+    _status, output = run([python, "-c", _VERSION_OF, dist])
+    return _json_field(output, "version")
+
+
+def repair_imports(
+    python: str,
+    target: str = "tbmcp.server",
+    *,
+    run: Runner = run_capture,
+    max_attempts: int = 3,
+    max_dists: int = 3,
+) -> tuple[list[Repair], ImportFailure | None]:
+    """Walk offending distributions down a release at a time until `target` imports.
+
+    `pip install "dist<current"` resolves to the next release below without us having
+    to enumerate the index — one less thing to keep current, and it works against a
+    private mirror too. Each distribution gets at most `max_attempts` downgrades, and
+    at most `max_dists` distinct distributions are touched per run; either bound
+    running out ends the walk with the failure that remained, never a loop.
+    """
+    repairs: list[Repair] = []
+    handled: set[str] = set()
+
+    failure = probe_import(python, target, run=run)
+    while failure is not None:
+        if not failure.module:
+            return repairs, failure
+        dist = distribution_for(python, failure.module, run=run)
+        if dist is None or dist in handled:
+            return repairs, failure
+        if len(handled) >= max_dists:
+            return repairs, failure
+        handled.add(dist)
+
+        started_at = installed_version(python, dist, run=run)
+        current = started_at
+        for _attempt in range(max_attempts):
+            if current is None:
+                break
+            status, _output = run(
+                [python, "-m", "pip", "install", "--quiet", f"{dist}<{current}"]
+            )
+            if status != 0:
+                break
+            current = installed_version(python, dist, run=run)
+            failure = probe_import(python, target, run=run)
+            if failure is None:
+                break
+            if distribution_for(python, failure.module, run=run) != dist:
+                break
+
+        if started_at is not None and current is not None and current != started_at:
+            repairs.append(Repair(dist=dist, from_version=started_at, to_version=current))
+
+        if failure is not None:
+            return repairs, failure
+
+    return repairs, None
+
+
+def write_constraints(venv_dir: pathlib.Path, repairs: Sequence[Repair]) -> pathlib.Path | None:
+    """Pin what the repair settled on, so a later reinstall cannot undo it."""
+    if not repairs:
+        return None
+    path = venv_dir / "constraints.txt"
+    path.write_text(
+        "".join(f"{repair.dist}=={repair.to_version}\n" for repair in repairs),
+        encoding="utf-8",
+    )
+    return path
