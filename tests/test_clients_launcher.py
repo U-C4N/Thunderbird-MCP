@@ -46,3 +46,38 @@ def test_server_command_falls_back_to_module(monkeypatch):
     command, args = clients.server_command(Settings())
     assert args[:2] == ["-m", "tbmcp"]
     assert command.endswith(("python", "python.exe", "python3"))
+
+
+def test_console_script_returns_none_when_all_unrunnable(monkeypatch, tmp_path):
+    """The candidate loop rejects all unrunnable paths and returns None."""
+    fake_python = tmp_path / "python.exe"
+    fake_python.write_bytes(b"fake")
+
+    monkeypatch.setattr(clients.shutil, "which", lambda name: None)
+    monkeypatch.setattr(clients.sys, "executable", str(fake_python))
+    # All candidates exist as files
+    monkeypatch.setattr(clients.Path, "is_file", lambda self: True)
+    # But all are unrunnable
+    monkeypatch.setattr(clients, "_runnable", lambda path: False)
+
+    result = clients._console_script()
+    assert result is None
+
+
+def test_console_script_returns_runnable_candidate(monkeypatch, tmp_path):
+    """The candidate loop returns the first runnable candidate."""
+    fake_python = tmp_path / "python.exe"
+    fake_python.write_bytes(b"fake")
+
+    monkeypatch.setattr(clients.shutil, "which", lambda name: None)
+    monkeypatch.setattr(clients.sys, "executable", str(fake_python))
+    # All candidates exist as files
+    monkeypatch.setattr(clients.Path, "is_file", lambda self: True)
+    # Only the .exe candidate is runnable
+    def is_runnable(path):
+        return str(path).endswith(("thunderbird-mcp.exe", "thunderbird-mcp"))
+    monkeypatch.setattr(clients, "_runnable", is_runnable)
+
+    result = clients._console_script()
+    assert result is not None
+    assert result.name == "thunderbird-mcp.exe"
