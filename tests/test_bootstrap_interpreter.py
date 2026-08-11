@@ -73,27 +73,50 @@ def test_json_parse_rejects_mere_substring_match():
     assert interpreter_ok("python", run=run) is False
 
 
-def test_launcher_resolves_versions():
+def test_launcher_resolves_versions(monkeypatch):
     """The py launcher is resolved to concrete paths, not passed as-is."""
     from tbmcp.bootstrap import candidate_interpreters
 
-    resolved_313 = r"C:\Python313\python.exe"
-    resolved_312 = r"C:\Python312\python.exe"
+    # Use distinctive paths that won't appear from hardcoded C:\PythonXXX fallback.
+    sentinel_launcher = r"C:\WINDOWS\py.EXE"
+    resolved_313 = r"C:\LauncherResolved\313\python.exe"
+    resolved_312 = r"C:\LauncherResolved\312\python.exe"
 
-    def run(argv):
-        if len(argv) >= 2 and argv[0] == "py" and argv[1] == "-3.13":
-            return 0, f"{resolved_313}\n"
-        if len(argv) >= 2 and argv[0] == "py" and argv[1] == "-3.12":
-            return 0, f"{resolved_312}\n"
-        if len(argv) >= 2 and argv[0] == "py" and argv[1] == "-3.11":
-            return 1, "not found"  # Simulate missing version
-        # For interpreter_ok calls (load test)
-        return 0, json.dumps({"ok": True})
+    def fake_which(name):
+        if name == "py":
+            return sentinel_launcher
+        # Don't find other pythons; we control the test environment.
+        return None
 
-    candidates = candidate_interpreters(run=run)
-    # Should include resolved paths, not the "py -X.Y" strings
-    assert resolved_313 in candidates
-    assert resolved_312 in candidates
-    assert "py -3.13" not in candidates
-    assert "py -3.12" not in candidates
-    assert "py -3.11" not in candidates
+    def run_fake(argv):
+        # Launcher resolution calls must match the resolved path from shutil.which.
+        if len(argv) >= 2 and argv[0] == sentinel_launcher:
+            if argv[1] == "-3.13":
+                return 0, f"{resolved_313}\n"
+            if argv[1] == "-3.12":
+                return 0, f"{resolved_312}\n"
+            if argv[1] == "-3.11":
+                return 1, "not found"  # Simulate unresolvable version.
+            raise AssertionError(f"Unexpected launcher call: {argv}")
+        # Interpreter load tests (from interpreter_ok).
+        if "-c" in argv:
+            return 0, json.dumps({"ok": True})
+        raise AssertionError(f"Unexpected run call: {argv}")
+
+    monkeypatch.setattr("shutil.which", fake_which)
+
+    candidates = candidate_interpreters(run=run_fake)
+
+    # Resolved launcher paths must be present.
+    assert resolved_313 in candidates, f"Missing {resolved_313} from {candidates}"
+    assert resolved_312 in candidates, f"Missing {resolved_312} from {candidates}"
+
+    # Unresolvable launcher version (3.11) must not be added via launcher resolution.
+    resolved_311 = r"C:\LauncherResolved\311\python.exe"
+    assert resolved_311 not in candidates, f"Unresolved 3.11 should not be in {candidates}"
+
+    # Launcher path itself must not appear.
+    assert sentinel_launcher not in candidates
+
+    # No garbage JSON strings from unhandled calls.
+    assert not any(c.startswith("{") for c in candidates), f"JSON garbage in {candidates}"
