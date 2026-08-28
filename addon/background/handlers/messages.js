@@ -72,7 +72,31 @@
    *  time skipped 9 of every 12. Hold the tail against the cursor instead. */
   const carriedOver = new Map();
   const MAX_CARRIED = 32;
+  /** Cursors whose tail we dropped, so a resume can say so instead of guessing. */
+  const droppedTails = new Set();
+  const MAX_DROPPED = 256;
   let tailSequence = 0;
+
+  /** Forget the least recently parked tail, and make its cursor unusable.
+   *
+   *  Eviction alone would reintroduce the very bug this cache exists to fix: the
+   *  cursor is usually Thunderbird's own list id, so a resume would miss the
+   *  cache, fall through to `continueList`, and cheerfully return the *next*
+   *  page — skipping the tail we just dropped, silently. Abort the underlying
+   *  list so that path fails loudly, and remember the key so the failure can name
+   *  its real cause rather than blaming a restart. */
+  function evictOldest() {
+    const key = carriedOver.keys().next().value;
+    const held = carriedOver.get(key);
+    carriedOver.delete(key);
+    if (held && held.listId) {
+      browser.messages.abortList(held.listId).catch(() => {});
+    }
+    if (droppedTails.size >= MAX_DROPPED) {
+      droppedTails.delete(droppedTails.values().next().value);
+    }
+    droppedTails.add(key);
+  }
 
   /** Park `rest` and return the cursor that will serve it.
    *
@@ -81,11 +105,11 @@
    *  still in hand. */
   function carryOver(listId, rest) {
     if (carriedOver.size >= MAX_CARRIED) {
-      // Insertion-ordered: drop the least recently parked. An abandoned search
-      // must not pin a page for the life of the session.
-      carriedOver.delete(carriedOver.keys().next().value);
+      evictOldest();
     }
     const key = listId || `tail-${(tailSequence += 1)}`;
+    // Reusing a key we previously dropped: it is live again.
+    droppedTails.delete(key);
     carriedOver.set(key, { messages: rest, listId });
     return key;
   }
@@ -99,6 +123,13 @@
       const held = carriedOver.get(cursor);
       carriedOver.delete(cursor);
       current = { messages: held.messages, id: held.listId };
+    } else if (cursor && droppedTails.has(cursor)) {
+      throw tbxError.usage(
+        `that cursor was dropped: more than ${MAX_CARRIED} searches were left ` +
+          "part-read, and this was the least recently used. Resuming it would skip " +
+          "messages, so re-run the search without a cursor — and page one search to " +
+          "the end before starting the next."
+      );
     } else if (cursor) {
       try {
         current = await browser.messages.continueList(cursor);

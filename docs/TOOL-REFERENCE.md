@@ -392,6 +392,10 @@ conversation id you can pass to `search_conversation`. For precise filters
 If this returns nothing unexpectedly, call `search_index_status`: the global
 indexer can be disabled or still catching up.
 
+`truncated` means the ranking only ordered the slice that was retrieved, so
+a deeper page may reorder and `matched` is a floor rather than a total.
+`totalAvailable` appears only when the whole result set came back.
+
 Parameters: **query**, limit, offset, folder_id  
 *(bold means required; `confirm` is the confirmation gate)*
 
