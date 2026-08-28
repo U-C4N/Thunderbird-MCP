@@ -116,6 +116,10 @@ def register(reg: Registrar) -> None:
 
         If this returns nothing unexpectedly, call `search_index_status`: the global
         indexer can be disabled or still catching up.
+
+        `truncated` means the ranking only ordered the slice that was retrieved, so
+        a deeper page may reorder and `matched` is a floor rather than a total.
+        `totalAvailable` appears only when the whole result set came back.
         """
         if not query or not query.strip():
             raise UsageError("query is required — pass the words to search for.")
@@ -132,12 +136,21 @@ def register(reg: Registrar) -> None:
         hits = result.get("hits") or result.get("messages") or []
         # `matched` is what the privileged half reports; there has never been a
         # `totalMatched`, so reading that key silently dropped the count from
-        # every result. `truncated` means the ranking only ordered the slice we
-        # retrieved, so a deeper page may reorder — worth surfacing.
+        # every result.
+        #
+        # It counts hits within what was actually retrieved, not across the
+        # corpus. Gloda has no cheap COUNT, so the retrieval is capped and sized
+        # from `offset + limit` — which means that when `truncated` is set the
+        # number is a floor, and one that moves as you page. Promoting that to
+        # `totalAvailable` would assert a total the search never established, so
+        # only do it when the whole result set came back.
+        truncated = bool(result.get("truncated"))
+        matched = result.get("matched")
         return page(
             hits,
-            total=result.get("matched"),
-            truncated=bool(result.get("truncated")),
+            total=None if truncated else matched,
+            truncated=truncated,
+            matched=matched,
             retrieved=result.get("retrieved"),
             indexEnabled=result.get("indexEnabled"),
             note=result.get("note"),

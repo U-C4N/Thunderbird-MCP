@@ -9,7 +9,9 @@
  *
  * Pagination note: Thunderbird returns a `MessageList` with an opaque `id` plus a
  * first page, and `messages.continueList(id)` walks it. We surface that id as our
- * `cursor` unchanged.
+ * `cursor` — except when a caller's `limit` lands mid-page, where the cursor also
+ * has to stand for the part of the page already fetched but not handed out. See
+ * `collectPage`.
  */
 
 {
@@ -60,16 +62,66 @@
     return listOrId;
   }
 
-  /** Walk a MessageList to at most `limit` items, returning a continuation cursor. */
-  async function takePage(list, limit) {
+  /** The tail of a page we fetched but have not handed out yet, by cursor.
+   *
+   *  Thunderbird chooses the page size and we cannot always override it —
+   *  `messages.list` takes no `messagesPerPage` at all. So whenever `limit` is
+   *  smaller than the page, stopping mid-page and returning the list id stranded
+   *  the remainder: `continueList` advances to the *next* page, and those
+   *  messages became unreachable. Measured on a 586-message folder, paging 3 at a
+   *  time skipped 9 of every 12. Hold the tail against the cursor instead. */
+  const carriedOver = new Map();
+  const MAX_CARRIED = 32;
+  let tailSequence = 0;
+
+  /** Park `rest` and return the cursor that will serve it.
+   *
+   *  `listId` is null on a final page — there is nothing left to continue from,
+   *  so mint a key rather than tell the caller the walk is over with messages
+   *  still in hand. */
+  function carryOver(listId, rest) {
+    if (carriedOver.size >= MAX_CARRIED) {
+      // Insertion-ordered: drop the least recently parked. An abandoned search
+      // must not pin a page for the life of the session.
+      carriedOver.delete(carriedOver.keys().next().value);
+    }
+    const key = listId || `tail-${(tailSequence += 1)}`;
+    carriedOver.set(key, { messages: rest, listId });
+    return key;
+  }
+
+  /** Fetch up to `limit` messages, resuming from `cursor` when there is one. */
+  async function collectPage(cursor, start, limit) {
     const messages = [];
-    let current = await asMessageList(list);
+    let current;
+
+    if (cursor && carriedOver.has(cursor)) {
+      const held = carriedOver.get(cursor);
+      carriedOver.delete(cursor);
+      current = { messages: held.messages, id: held.listId };
+    } else if (cursor) {
+      try {
+        current = await browser.messages.continueList(cursor);
+      } catch (ex) {
+        throw tbxError.usage(
+          "that cursor has expired (Thunderbird drops message lists when it restarts " +
+            "or after a timeout) — re-run the search without a cursor"
+        );
+      }
+    } else {
+      current = await asMessageList(await start());
+    }
+
     while (current) {
-      for (const message of current.messages || []) {
-        messages.push(header(message));
+      const page = current.messages || [];
+      for (let index = 0; index < page.length; index += 1) {
+        messages.push(header(page[index]));
         if (messages.length >= limit) {
-          // Keep the list alive so the caller can continue from it.
-          return { messages, cursor: current.id || null };
+          const rest = page.slice(index + 1);
+          return {
+            messages,
+            cursor: rest.length ? carryOver(current.id, rest) : current.id || null,
+          };
         }
       }
       if (!current.id) {
@@ -81,20 +133,6 @@
       }
     }
     return { messages, cursor: null };
-  }
-
-  async function resumeOrStart(cursor, start) {
-    if (cursor) {
-      try {
-        return await browser.messages.continueList(cursor);
-      } catch (ex) {
-        throw tbxError.usage(
-          "that cursor has expired (Thunderbird drops message lists when it restarts " +
-            "or after a timeout) — re-run the search without a cursor"
-        );
-      }
-    }
-    return start();
   }
 
   // --------------------------------------------------------------------- query
@@ -160,8 +198,7 @@
     query.returnMessageListId = true;
     query.messagesPerPage = Math.min(Math.max(limit, 10), 100);
 
-    const list = await resumeOrStart(params.cursor, () => browser.messages.query(query));
-    const paged = await takePage(list, limit);
+    const paged = await collectPage(params.cursor, () => browser.messages.query(query), limit);
     const result = {
       messages: paged.messages,
       cursor: paged.cursor,
@@ -182,13 +219,15 @@
   tbxRegistry.define("messages.list", async (params) => {
     const folderId = tbxUtil.need(params, "folderId", "string");
     const limit = params.limit || DEFAULT_LIMIT;
-    const list = await resumeOrStart(params.cursor, () =>
-      browser.messages.list(folderId, {
-        sortType: params.sortType || "date",
-        sortOrder: params.sortOrder || "descending",
-      })
+    const paged = await collectPage(
+      params.cursor,
+      () =>
+        browser.messages.list(folderId, {
+          sortType: params.sortType || "date",
+          sortOrder: params.sortOrder || "descending",
+        }),
+      limit
     );
-    const paged = await takePage(list, limit);
     return { messages: paged.messages, cursor: paged.cursor, folderId };
   });
 

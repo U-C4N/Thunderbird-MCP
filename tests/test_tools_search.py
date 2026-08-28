@@ -48,8 +48,8 @@ async def test_global_search_reports_how_many_matched(fake_bridge) -> None:
                 "query": "release",
                 "hits": [HIT],
                 "matched": 33,
-                "retrieved": 50,
-                "truncated": True,
+                "retrieved": 33,
+                "truncated": False,
                 "indexEnabled": True,
             }
         }
@@ -60,10 +60,34 @@ async def test_global_search_reports_how_many_matched(fake_bridge) -> None:
     assert not result.is_error, _text(result)
     payload = result.structured_content
     assert payload["totalAvailable"] == 33
-    assert payload["retrieved"] == 50
-    # The ranking only ordered what was retrieved, so a deeper page may reorder.
-    assert payload["truncated"] is True
+    assert payload["matched"] == 33
+    assert payload["retrieved"] == 33
     assert payload["items"][0]["conversationId"] == 718
+
+
+async def test_a_capped_ranking_does_not_claim_a_total(fake_bridge) -> None:
+    """`matched` counts hits inside a capped retrieval whose size is derived from
+    `offset + limit`, so under truncation it is a floor that moves as you page.
+    Reporting it as `totalAvailable` would assert a total nobody measured."""
+    bridge = fake_bridge(
+        {
+            "x.gloda.search": {
+                "hits": [HIT],
+                "matched": 75,
+                "retrieved": 1000,
+                "truncated": True,
+                "indexEnabled": True,
+            }
+        }
+    )
+    async with Client(_server(bridge)) as client:
+        result = await client.call_tool("search_global", {"query": "release", "limit": 5})
+
+    payload = result.structured_content
+    assert "totalAvailable" not in payload
+    # The floor is still worth having, just not under a name that means "total".
+    assert payload["matched"] == 75
+    assert payload["truncated"] is True
 
 
 async def test_a_complete_ranking_is_not_flagged_as_truncated(fake_bridge) -> None:
@@ -81,7 +105,9 @@ async def test_a_complete_ranking_is_not_flagged_as_truncated(fake_bridge) -> No
     async with Client(_server(bridge)) as client:
         result = await client.call_tool("search_global", {"query": "release"})
 
-    assert "truncated" not in result.structured_content
+    payload = result.structured_content
+    assert "truncated" not in payload
+    assert payload["totalAvailable"] == 1
 
 
 async def test_global_search_surfaces_the_note_explaining_an_empty_result(fake_bridge) -> None:
