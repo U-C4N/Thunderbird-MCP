@@ -56,15 +56,26 @@
     try {
       return await browser.tbx.invoke(bare, params);
     } catch (ex) {
-      // The privileged half tags its errors `tbx:<kind>:<message>` because
-      // ExtensionCommon.normalizeError rebuilds the Error on the way across and
-      // drops every property but the message. Read the tag when it is there.
+      // The privileged half packs `tbx:` + a JSON payload into the message,
+      // because ExtensionCommon.normalizeError rebuilds the Error on the way
+      // across and drops every property but the message. Unpack it when present:
+      // `needs` has to arrive as data, since PROTOCOL.md has clients read it to
+      // learn what would unblock the call.
       const raw = String(ex.message || ex);
-      const tagged = /^tbx:(usage|blocked|unsupported|thunderbird):([\s\S]*)$/.exec(raw);
-      if (tagged) {
-        const [, kind, message] = tagged;
-        const make = tbxError[kind] || tbxError.thunderbird;
-        throw make(message);
+      if (raw.startsWith("tbx:")) {
+        let payload = null;
+        try {
+          payload = JSON.parse(raw.slice(4));
+        } catch (parseError) {
+          payload = null;
+        }
+        if (payload && typeof payload.message === "string") {
+          if (payload.kind === "blocked") {
+            throw tbxError.blocked(payload.message, payload.needs);
+          }
+          const make = tbxError[payload.kind] || tbxError.thunderbird;
+          throw make(payload.message);
+        }
       }
       // Untagged: something outside invoke() threw. Guess from the text, as before.
       const message = raw;

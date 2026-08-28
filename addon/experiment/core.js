@@ -99,7 +99,7 @@ function needMod(key) {
 
 /* ------------------------------------------------------------------ helpers */
 
-/** Prefix that carries an error's kind across the API boundary intact. */
+/** Prefix marking a message that carries a JSON error payload, not prose. */
 const TBX_ERROR_TAG = "tbx:";
 
 /** Re-throw an error so its message survives the experiment API boundary.
@@ -110,14 +110,24 @@ const TBX_ERROR_TAG = "tbx:";
  *  those, so every failure here reached the caller as the generic
  *  "An unexpected error occurred" with the real text left in the Error Console.
  *  That is how a bare `setTimeout is not defined` presented as an unexplained
- *  tool failure. Wrap in ExtensionError, and keep the kind in a prefix the
- *  background page strips — normalizeError rebuilds the Error and drops any
- *  properties we might otherwise have hung on it. */
+ *  tool failure. Wrap in ExtensionError, and carry the taxonomy as JSON inside
+ *  the message — normalizeError rebuilds the Error and drops every property but
+ *  `message`, so the message is the only channel there is. */
 function wireError(error) {
-  const kind = (error && error.tbxKind) || "thunderbird";
-  const message = String((error && error.message) || error || "unknown error");
-  const needs = error && error.needs ? ` (requires: ${[].concat(error.needs).join(", ")})` : "";
-  const tagged = `${TBX_ERROR_TAG}${kind}:${message}${needs}`;
+  const payload = {
+    kind: (error && error.tbxKind) || "thunderbird",
+    message: String((error && error.message) || error || "unknown error"),
+  };
+  // `needs` is protocol, not prose: PROTOCOL.md promises a `blocked` error
+  // "lists what would unblock it", and callers pass a real remedy — files.write
+  // answers "overwrite=true, or a different filename". Flattened into the
+  // message it stops being something a client can act on programmatically, and
+  // the Python layer appends its own "(requires: …)" from the structured field,
+  // so prose here would read twice. Keep it a field.
+  if (error && error.needs) {
+    payload.needs = [].concat(error.needs);
+  }
+  const tagged = TBX_ERROR_TAG + JSON.stringify(payload);
   try {
     const { ExtensionError } = ChromeUtils.importESModule(
       "resource://gre/modules/ExtensionUtils.sys.mjs"

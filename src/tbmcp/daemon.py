@@ -41,6 +41,28 @@ DEFAULT_IDLE_TIMEOUT = 900.0
 ProgressCb = Callable[[dict[str, Any]], Awaitable[None]]
 
 
+def error_payload(exc: BaseException) -> dict[str, Any]:
+    """A failure in the protocol's `error` shape, ready to relay.
+
+    Uses `.message` rather than `str(exc)`. This hop re-serialises an error the
+    add-on already sent us structured, and `TbmcpError.__str__` renders `code` and
+    `needs` *into* the text for a human reader — so relaying that baked them into
+    the message, and the far side then rendered its own copy from the structured
+    fields it was also given. `[Error] [Error]` and a doubled `(requires: …)` were
+    both this. Round-tripping has to be idempotent, because it happens twice on
+    every add-on failure: once here, once in `Bridge.call`.
+    """
+    payload: dict[str, Any] = {
+        "kind": getattr(exc, "kind", "internal"),
+        "code": getattr(exc, "code", None),
+        "message": getattr(exc, "message", None) or str(exc),
+    }
+    needs = getattr(exc, "needs", None)
+    if needs:
+        payload["needs"] = needs
+    return payload
+
+
 @dataclass
 class _Pending:
     future: asyncio.Future[Any]
@@ -365,15 +387,7 @@ class Daemon:
                 on_progress=forward_progress if wants_progress else None,
             )
         except Exception as exc:
-            kind = getattr(exc, "kind", "internal")
-            payload: dict[str, Any] = {
-                "kind": kind,
-                "code": getattr(exc, "code", None),
-                "message": str(exc),
-            }
-            needs = getattr(exc, "needs", None)
-            if needs:
-                payload["needs"] = needs
+            payload = error_payload(exc)
             with contextlib.suppress(Exception):
                 await ipc.write_message(
                     writer, {"t": "res", "id": request_id, "ok": False, "error": payload}
