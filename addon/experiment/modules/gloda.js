@@ -130,29 +130,85 @@ TBX_MODULE_NAMES.push("gloda");
     }
   }
 
-  /** Accept a WebExtension folder id or a raw folder URI; gloda speaks URIs. */
-  function folderRefToUri(ref) {
-    const text = String(ref).trim();
-    if (text.includes("://")) {
-      return text;
+  /** The account keys this profile actually has. */
+  function accountKeys() {
+    const keys = new Set();
+    try {
+      for (const account of needMod("MailServices").accounts.accounts) {
+        if (account && account.key) {
+          keys.add(account.key);
+        }
+      }
+    } catch (ex) {
+      // An empty set only costs us the "no such account" error message.
     }
+    return keys;
+  }
+
+  /** Split `account7://INBOX` into its account key and folder path.
+   *
+   *  webExtFolderId builds the id as `${key}:/${path}` where `path` itself
+   *  starts with "/", so the separator occupies two characters and the path
+   *  begins at `cut + 2`. Slicing from `cut + 1` — as this did — kept a leading
+   *  slash, producing `imap://…com//INBOX`: a URI that names no folder, so the
+   *  hit filter matched nothing and every folder-scoped search_global came back
+   *  empty, blaming the index. */
+  function splitFolderId(text) {
     const cut = text.indexOf(":/");
     if (cut < 1) {
-      throw H.usage(
-        `${text} is not a folder id — pass one returned by folder_list, or a folder URI`
-      );
+      return null;
     }
+    const key = text.slice(0, cut);
+    return accountKeys().has(key) ? { key, path: text.slice(cut + 2) } : null;
+  }
+
+  /** Decide whether a gloda hit is in the folder the caller named.
+   *
+   *  A caller may name either form and the two are not tellable apart by
+   *  punctuation — a folder id contains "://" exactly like a folder URI does.
+   *  So resolve what we can and compare against both fields a hit carries,
+   *  rather than converting one form into the other and trusting the round trip
+   *  to be byte-exact. */
+  function folderScope(ref) {
+    const text = String(ref).trim();
+    const keys = new Set([text]);
+    const parts = splitFolderId(text);
+    let resolved = Boolean(parts);
     const accounts = extensionAccounts();
-    if (!accounts || !accounts.folderPathToURI) {
-      throw H.unsupported(
-        "this build cannot translate folder ids to folder URIs; pass a folder URI instead"
+    if (parts && accounts && accounts.folderPathToURI) {
+      let uri = null;
+      try {
+        uri = accounts.folderPathToURI(parts.key, parts.path);
+      } catch (ex) {
+        uri = null;
+      }
+      if (uri) {
+        keys.add(uri);
+      }
+    }
+    if (!resolved) {
+      // Not a folder id, so it has to be a URI under one of this profile's
+      // servers. Checking against the real root URIs beats guessing at schemes.
+      try {
+        for (const account of needMod("MailServices").accounts.accounts) {
+          const root = account && account.incomingServer && account.incomingServer.rootFolder;
+          if (root && (text === root.URI || text.startsWith(`${root.URI}/`))) {
+            resolved = true;
+            break;
+          }
+        }
+      } catch (ex) {
+        // Cannot enumerate: accept it rather than refuse a call we cannot judge.
+        resolved = true;
+      }
+    }
+    if (!resolved) {
+      throw H.usage(
+        `${text} names no folder in this profile — pass an id from folder_list, ` +
+          "or a folder URI"
       );
     }
-    const uri = accounts.folderPathToURI(text.slice(0, cut), text.slice(cut + 1));
-    if (!uri) {
-      throw H.usage(`no account with key ${text.slice(0, cut)}`);
-    }
-    return uri;
+    return (entry) => keys.has(entry.folderUri) || keys.has(entry.folderId);
   }
 
   /** Run a gloda query to completion, or give up loudly. */
@@ -181,9 +237,18 @@ TBX_MODULE_NAMES.push("gloda");
   }
 
   function isoDate(value) {
-    if (value instanceof Date) {
+    if (value === null || value === undefined) {
+      return null;
+    }
+    /* Duck-type rather than `instanceof Date`. Gloda mints its Date objects in
+     * the shared system global (GlodaDatastore.sys.mjs), while this code runs in
+     * the ext-*.js sandbox — a different realm with a different Date.prototype,
+     * so `instanceof` is false for every one of them. That silently nulled the
+     * date on every hit, which also flattened the conversation ordering that
+     * byDateThenSubject is supposed to provide. */
+    if (typeof value.getTime === "function") {
       const ms = value.getTime();
-      return Number.isFinite(ms) ? value.toISOString() : null;
+      return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
     }
     // Gloda stores PRTime (microseconds) and normally hands back a Date, but
     // conversation bounds have been seen raw.
@@ -262,6 +327,46 @@ TBX_MODULE_NAMES.push("gloda");
     };
   }
 
+  /** Everyone who appears anywhere in the thread, in first-seen order.
+   *
+   *  `involves` is gloda's own union of from/to/cc/bcc. It is an optimization
+   *  attribute and can be absent on a ghost, so fall back to from/to. */
+  function participantsOf(messages) {
+    const seen = new Set();
+    const out = [];
+    const add = (identity) => {
+      const label = identityLabel(identity);
+      if (label && !seen.has(label)) {
+        seen.add(label);
+        out.push(label);
+      }
+    };
+    for (const message of messages) {
+      let involves = null;
+      try {
+        involves = message.involves;
+      } catch (ex) {
+        involves = null;
+      }
+      if (involves && involves.length) {
+        for (const identity of involves) {
+          add(identity);
+        }
+        continue;
+      }
+      try {
+        add(message.from);
+        for (const identity of message.to || []) {
+          add(identity);
+        }
+      } catch (ex) {
+        // A referenced-but-unindexed message carries no identities; the rest
+        // of the thread still names the people involved.
+      }
+    }
+    return out;
+  }
+
   function byDateThenSubject(a, b) {
     const left = a.date || "";
     const right = b.date || "";
@@ -275,6 +380,36 @@ TBX_MODULE_NAMES.push("gloda");
     return Services.prefs.getBoolPref("mailnews.database.global.indexer.enabled", false);
   }
 
+  const NEAR = /^NEAR(\/\d+)?$/;
+
+  /** Whether GlodaMsgSearcher.buildFulltextQuery puts this term into the SQL at
+   *  all — it silently omits anything shorter, which is why a stray "-" or "2"
+   *  costs nothing. */
+  function isEmitted(term) {
+    if (NEAR.test(term)) {
+      return true;
+    }
+    if (term.length >= 3) {
+      return true;
+    }
+    const cjk = (index) => term.charCodeAt(index) >= 0x2000;
+    return (term.length === 1 && cjk(0)) || (term.length === 2 && cjk(0) && cjk(1));
+  }
+
+  /** Whether the term survives tokenization with something the index can match.
+   *  Gloda's tokenizer splits on non-alphanumerics and drops tokens under three
+   *  characters (one for CJK), so "2.0" yields nothing while "e-mail" yields
+   *  "mail". */
+  function isSearchable(term) {
+    if (NEAR.test(term)) {
+      return true;
+    }
+    return String(term)
+      .split(/[^\p{L}\p{N}]+/u)
+      .filter(Boolean)
+      .some((token) => token.length >= 3 || token.charCodeAt(0) >= 0x2000);
+  }
+
   // ------------------------------------------------------------------- search
 
   TBX_MODULES["gloda.search"] = async (params) => {
@@ -284,27 +419,33 @@ TBX_MODULE_NAMES.push("gloda");
       MAX_HITS
     );
     const offset = Number.isInteger(params.offset) && params.offset > 0 ? params.offset : 0;
-    const folderUri = params.folderId ? folderRefToUri(params.folderId) : null;
+    const inScope = params.folderId ? folderScope(params.folderId) : null;
     const Searcher = needMod("GlodaMsgSearcher");
 
-    const searcher = new Searcher(null, query, params.matchAll !== false);
+    const matchAll = params.matchAll !== false;
+    const searcher = new Searcher(null, query, matchAll);
+    const terms = searcher.fulltextTerms || [];
     // The tokenizer drops terms shorter than three characters (one or two for
     // CJK), so a query made only of those silently matches everything or
     // nothing. Say so instead.
-    const usable = (searcher.fulltextTerms || []).some(
-      (term) => term.length >= 3 || term.charCodeAt(0) >= 0x2000
-    );
+    const usable = terms.some(isSearchable);
     if (!usable) {
       throw H.usage(
         `no searchable term in ${JSON.stringify(query)} — the global index needs ` +
           "terms of at least three characters (one for CJK)"
       );
     }
+    /* A term long enough to reach the query but made only of tokens the indexer
+     * throws away — "2.0" splits into "2" and "0" — is a phrase that can never
+     * match, and under AND it takes the whole query down with it. Pasting a
+     * subject line into search_global hits this constantly, and the result was
+     * an empty answer blaming the index. Name the terms instead. */
+    const unmatchable = terms.filter((term) => isEmitted(term) && !isSearchable(term));
 
     /* Gloda has no OFFSET, and a folder filter can only be applied after the
      * fact because the searcher's SQL is fixed. Over-fetch, then slice. */
     const retrieve = Math.min(
-      Math.max((offset + limit) * (folderUri ? 10 : 3), 50),
+      Math.max((offset + limit) * (inScope ? 10 : 3), 50),
       MAX_RETRIEVE
     );
     const messages = await collect(
@@ -324,8 +465,8 @@ TBX_MODULE_NAMES.push("gloda");
     // searcher.scores accumulates in the order items were handed to us.
     const scores = searcher.scores || [];
     let hits = messages.map((message, index) => hit(message, scores[index]));
-    if (folderUri) {
-      hits = hits.filter((entry) => entry.folderUri === folderUri);
+    if (inScope) {
+      hits = hits.filter(inScope);
     }
     hits.sort((a, b) => (b.score || 0) - (a.score || 0) || byDateThenSubject(b, a));
 
@@ -339,12 +480,30 @@ TBX_MODULE_NAMES.push("gloda");
       truncated: messages.length >= retrieve,
       indexEnabled: enabled,
     };
+    if (unmatchable.length) {
+      result.unmatchableTerms = unmatchable;
+    }
     if (!result.hits.length) {
-      result.note = enabled
-        ? "Nothing in the global index matched. Only indexed messages are searchable — " +
-          "check x.gloda.stats, or fall back to mail_search with subject/author filters."
-        : "Thunderbird's global index is disabled, so this search can never match. " +
+      if (!enabled) {
+        result.note =
+          "Thunderbird's global index is disabled, so this search can never match. " +
           "Enable it in Settings > General > Indexing, or use mail_search instead.";
+      } else if (unmatchable.length && matchAll) {
+        result.note =
+          `The index cannot match ${unmatchable.map((t) => JSON.stringify(t)).join(", ")} — ` +
+          "it tokenizes into pieces shorter than three characters, and every term has to " +
+          "match, so this query can never return anything. Drop those words and search " +
+          "again, or use mail_search with a subject filter for an exact substring.";
+      } else if (unmatchable.length) {
+        result.note =
+          `The index cannot match ${unmatchable.map((t) => JSON.stringify(t)).join(", ")}; ` +
+          "the remaining terms matched nothing either. Try mail_search with a subject " +
+          "or author filter.";
+      } else {
+        result.note =
+          "Nothing in the global index matched. Only indexed messages are searchable — " +
+          "check x.gloda.stats, or fall back to mail_search with subject/author filters.";
+      }
     }
     return result;
   };
@@ -429,6 +588,7 @@ TBX_MODULE_NAMES.push("gloda");
     return {
       conversationId: conversation.id,
       subject: conversation.subject,
+      participants: participantsOf(messages),
       oldestDate: isoDate(conversation.oldestMessageDate),
       newestDate: isoDate(conversation.newestMessageDate),
       messages: ordered.slice(0, limit),

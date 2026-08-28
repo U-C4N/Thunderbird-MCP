@@ -44,10 +44,26 @@
     };
   }
 
+  /** Resolve whatever `query`/`list` handed back into an actual MessageList.
+   *
+   *  `messages.query({returnMessageListId: true})` does not return a MessageList:
+   *  its schema return type is `MessageList | string`, and with the flag set
+   *  MessageQuery.startSearch() returns `this.messageList.id` — a bare string —
+   *  so the caller can hold the list id before the first page has filled. Walking
+   *  that string as if it were a page yielded no `.messages` and no `.id`, so
+   *  every messages.query answered `{messages: [], cursor: null}` no matter what
+   *  was asked. Trade the id for its first page here. */
+  async function asMessageList(listOrId) {
+    if (typeof listOrId === "string") {
+      return browser.messages.continueList(listOrId);
+    }
+    return listOrId;
+  }
+
   /** Walk a MessageList to at most `limit` items, returning a continuation cursor. */
   async function takePage(list, limit) {
     const messages = [];
-    let current = list;
+    let current = await asMessageList(list);
     while (current) {
       for (const message of current.messages || []) {
         messages.push(header(message));
@@ -83,6 +99,60 @@
 
   // --------------------------------------------------------------------- query
 
+  function collectFolderIds(folders, out) {
+    for (const folder of folders || []) {
+      if (folder.id) {
+        out.push(folder.id);
+      }
+      collectFolderIds(folder.subFolders, out);
+    }
+    return out;
+  }
+
+  /** Which folders the query covered, so an empty result can be interpreted.
+   *
+   *  Thunderbird does not report this back, but its scoping rule is fixed
+   *  (ExtensionMessages.sys.mjs::MessageQuery.startSearch): `folderId` scopes to
+   *  those folders, plus their descendants when `includeSubFolders` is set; with
+   *  no `folderId` every folder of the named accounts — or of every account — is
+   *  searched. Mirror that rule rather than guess at it. An unscoped search names
+   *  the accounts instead of enumerating thousands of folder ids. */
+  function accountIdOf(folderId) {
+    const cut = String(folderId).indexOf(":/");
+    return cut > 0 ? String(folderId).slice(0, cut) : null;
+  }
+
+  async function searchedScope(query) {
+    const named = query.accountId ? [].concat(query.accountId) : null;
+    if (query.folderId) {
+      // With both set Thunderbird intersects them: a folder outside the named
+      // accounts is dropped, not searched.
+      const roots = [].concat(query.folderId).filter(
+        (id) => !named || named.includes(accountIdOf(id))
+      );
+      const folderIds = roots.slice();
+      if (query.includeSubFolders) {
+        for (const root of roots) {
+          const children = await browser.folders.getSubFolders(root, true).catch(() => []);
+          collectFolderIds(children, folderIds);
+        }
+      }
+      return {
+        scope: "folders",
+        accountIds: [...new Set(roots.map(accountIdOf).filter(Boolean))],
+        folderIds,
+        includeSubFolders: Boolean(query.includeSubFolders),
+      };
+    }
+    const accountIds =
+      named || ((await browser.accounts.list(false).catch(() => [])) || []).map((a) => a.id);
+    return {
+      scope: named ? "accounts" : "all-accounts",
+      accountIds,
+      includeSubFolders: true,
+    };
+  }
+
   tbxRegistry.define("messages.query", async (params) => {
     const limit = params.limit || DEFAULT_LIMIT;
     const query = Object.assign({}, params.query || {});
@@ -92,7 +162,11 @@
 
     const list = await resumeOrStart(params.cursor, () => browser.messages.query(query));
     const paged = await takePage(list, limit);
-    const result = { messages: paged.messages, cursor: paged.cursor };
+    const result = {
+      messages: paged.messages,
+      cursor: paged.cursor,
+      searchedFolders: await searchedScope(query),
+    };
     if (query.fullText && browser.tbx) {
       // Worth saying: fullText only sees what the global indexer has processed.
       const indexed = await browser.tbx.globalIndexEnabled().catch(() => null);

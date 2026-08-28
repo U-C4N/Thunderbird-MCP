@@ -125,3 +125,57 @@ def test_a_module_that_does_not_announce_itself_is_rejected(tmp_path) -> None:
     )
     with pytest.raises(ValueError, match="TBX_MODULE_NAMES"):
         assemble_implementation(source)
+
+
+# --------------------------------------------------------- privileged sandbox rules
+#
+# The privileged half runs in the ext-*.js sandbox that
+# ExtensionCommon.sys.mjs::_createExtGlobal builds: system principal,
+# `wantGlobalProperties: ["ChromeUtils"]`, and an explicit Object.assign of
+# Services / Cc / Ci / Cu / Cr / IOUtils / PathUtils / XPCOMUtils. It is not a DOM
+# and it is not the same realm as the modules it talks to. Both facts have already
+# cost a release: each rule below marks a bug that shipped, produced no error the
+# Python layer could see, and silently disabled a whole toolset.
+
+
+def test_the_privileged_half_imports_its_own_timers(built) -> None:
+    """`setTimeout` is a DOM global and the sandbox has no DOM.
+
+    Calling it threw ReferenceError inside every H.withTimeout(), which rejected the
+    deadline before the work it guarded had started — taking out gloda search,
+    conversation lookup and the calendar/filters/junk deadlines at once.
+    """
+    _, _, implementation = built
+    assert "resource://gre/modules/Timer.sys.mjs" in implementation, (
+        "the privileged half must import setTimeout/clearTimeout from Timer.sys.mjs; "
+        "there is no timer function on the ext-*.js sandbox global"
+    )
+
+
+def test_the_privileged_half_does_not_brand_check_across_realms(built) -> None:
+    """`instanceof` is false for objects minted in another realm.
+
+    Gloda builds its Date objects in the shared system global, so `value instanceof
+    Date` in the sandbox was false for every one of them and every search hit came
+    back with `date: null` — which also flattened conversation ordering.
+    """
+    _, _, implementation = built
+    assert 'typeof value.getTime === "function"' in implementation, (
+        "dates coming back from gloda must be duck-typed, not brand-checked; a Date "
+        "built in another realm fails instanceof"
+    )
+
+
+def test_privileged_errors_survive_the_api_boundary(built) -> None:
+    """ExtensionCommon.normalizeError keeps a message only for a plain object, an
+    ExtensionError, or an error the extension's principal subsumes.
+
+    A plain `new Error` raised here is none of those, so it reached the caller as
+    "An unexpected error occurred" with the real text left in the Error Console.
+    That is what made the timer bug above take three days to find.
+    """
+    _, _, implementation = built
+    assert "resource://gre/modules/ExtensionUtils.sys.mjs" in implementation, (
+        "errors leaving invoke() must be wrapped in ExtensionError, or their message "
+        "is replaced with a generic string before anyone sees it"
+    )

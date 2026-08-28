@@ -130,9 +130,15 @@ def register(reg: Registrar) -> None:
             timeout=120.0,
         )
         hits = result.get("hits") or result.get("messages") or []
+        # `matched` is what the privileged half reports; there has never been a
+        # `totalMatched`, so reading that key silently dropped the count from
+        # every result. `truncated` means the ranking only ordered the slice we
+        # retrieved, so a deeper page may reorder — worth surfacing.
         return page(
             hits,
-            total=result.get("totalMatched"),
+            total=result.get("matched"),
+            truncated=bool(result.get("truncated")),
+            retrieved=result.get("retrieved"),
             indexEnabled=result.get("indexEnabled"),
             note=result.get("note"),
             query=query,
@@ -162,6 +168,7 @@ def register(reg: Registrar) -> None:
         result = await call("x.gloda.conversation", params, timeout=120.0)
         return page(
             result.get("messages") or [],
+            total=result.get("total"),
             conversationId=result.get("conversationId"),
             subject=result.get("subject"),
             participants=result.get("participants"),

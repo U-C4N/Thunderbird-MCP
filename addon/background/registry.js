@@ -30,7 +30,10 @@ var tbxError = {
     const payload = {
       kind: ex.tbxKind || "thunderbird",
       message: String(ex.message || ex),
-      code: ex.code || ex.name || null,
+      // `name` is worth carrying when it says something — ReferenceError,
+      // TypeError, an nsresult — but a bare "Error" is every JS error ever
+      // thrown, and it rendered as a spurious `[Error]` tag on the message.
+      code: ex.code || (ex.name && ex.name !== "Error" ? ex.name : null),
     };
     if (ex.needs) {
       payload.needs = Array.isArray(ex.needs) ? ex.needs : [ex.needs];

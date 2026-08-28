@@ -56,9 +56,18 @@
     try {
       return await browser.tbx.invoke(bare, params);
     } catch (ex) {
-      // Errors thrown inside the experiment arrive as plain Error objects with the
-      // message intact; re-tag them so the taxonomy survives the hop.
-      const message = String(ex.message || ex);
+      // The privileged half tags its errors `tbx:<kind>:<message>` because
+      // ExtensionCommon.normalizeError rebuilds the Error on the way across and
+      // drops every property but the message. Read the tag when it is there.
+      const raw = String(ex.message || ex);
+      const tagged = /^tbx:(usage|blocked|unsupported|thunderbird):([\s\S]*)$/.exec(raw);
+      if (tagged) {
+        const [, kind, message] = tagged;
+        const make = tbxError[kind] || tbxError.thunderbird;
+        throw make(message);
+      }
+      // Untagged: something outside invoke() threw. Guess from the text, as before.
+      const message = raw;
       if (/ is required|must be|unknown privileged method|not an? /.test(message)) {
         throw tbxError.usage(message);
       }

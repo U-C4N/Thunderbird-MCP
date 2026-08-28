@@ -22,6 +22,21 @@
 
 "use strict";
 
+/* ------------------------------------------------------------------- timers */
+
+/* Timers are not globals here. `setTimeout` is a DOM global, and the ext-*.js
+ * sandbox is built with `wantGlobalProperties: ["ChromeUtils"]` and an explicit
+ * Object.assign of Services/Cc/Ci/Cu/Cr/IOUtils/PathUtils/XPCOMUtils — no timer
+ * functions (ExtensionCommon.sys.mjs::_createExtGlobal, verified on Thunderbird
+ * 153). Calling setTimeout threw ReferenceError inside every H.withTimeout(),
+ * which rejected the deadline promise before the work it guarded had started:
+ * gloda.search and gloda.conversation failed outright, gloda.stats swallowed it
+ * into `indexedMessages: null`, and calendar/filters/junk lost their deadlines
+ * too. Import the real ones — the module is the same one the DOM globals wrap. */
+const { setTimeout, clearTimeout } = ChromeUtils.importESModule(
+  "resource://gre/modules/Timer.sys.mjs"
+);
+
 /* ------------------------------------------------------------------ modules */
 
 /** Module URLs as they exist on Thunderbird 128–153. Resolution is lazy so a
@@ -83,6 +98,37 @@ function needMod(key) {
 }
 
 /* ------------------------------------------------------------------ helpers */
+
+/** Prefix that carries an error's kind across the API boundary intact. */
+const TBX_ERROR_TAG = "tbx:";
+
+/** Re-throw an error so its message survives the experiment API boundary.
+ *
+ *  ExtensionCommon.sys.mjs::normalizeError keeps a message only for a plain
+ *  object, an ExtensionError, or an error whose principal the extension
+ *  subsumes. A `new Error` raised in this system-principal sandbox is none of
+ *  those, so every failure here reached the caller as the generic
+ *  "An unexpected error occurred" with the real text left in the Error Console.
+ *  That is how a bare `setTimeout is not defined` presented as an unexplained
+ *  tool failure. Wrap in ExtensionError, and keep the kind in a prefix the
+ *  background page strips — normalizeError rebuilds the Error and drops any
+ *  properties we might otherwise have hung on it. */
+function wireError(error) {
+  const kind = (error && error.tbxKind) || "thunderbird";
+  const message = String((error && error.message) || error || "unknown error");
+  const needs = error && error.needs ? ` (requires: ${[].concat(error.needs).join(", ")})` : "";
+  const tagged = `${TBX_ERROR_TAG}${kind}:${message}${needs}`;
+  try {
+    const { ExtensionError } = ChromeUtils.importESModule(
+      "resource://gre/modules/ExtensionUtils.sys.mjs"
+    );
+    return new ExtensionError(tagged);
+  } catch (ex) {
+    // Without ExtensionError the message is lost anyway; a plain object is the
+    // other shape normalizeError preserves.
+    return { message: tagged };
+  }
+}
 
 const H = {
   usage(message) {
@@ -220,14 +266,21 @@ const H = {
     }
   },
 
-  /** Wrap a callback-style Thunderbird API as a promise with a deadline. */
+  /** Wrap a callback-style Thunderbird API as a promise with a deadline.
+   *
+   *  The timer is cleared once the race settles. Without that, a 45s search
+   *  deadline keeps a live timer for 45s after the search has already answered,
+   *  which on a busy session is a slow drip of pending timers holding closures. */
   withTimeout(promise, ms, what) {
-    return Promise.race([
-      promise,
-      new Promise((_resolve, reject) =>
-        setTimeout(() => reject(new Error(`${what} timed out after ${ms}ms`)), ms)
-      ),
-    ]);
+    let timer = null;
+    const deadline = new Promise((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(`${what} timed out after ${ms}ms`)), ms);
+    });
+    return Promise.race([promise, deadline]).finally(() => {
+      if (timer !== null) {
+        clearTimeout(timer);
+      }
+    });
   },
 };
 
@@ -464,9 +517,13 @@ this.tbx = class extends ExtensionAPI {
           const handler = TBX_MODULES[method];
           if (!handler) {
             const known = Object.keys(TBX_MODULES).sort().join(", ");
-            throw H.usage(`unknown privileged method ${method} (known: ${known})`);
+            throw wireError(H.usage(`unknown privileged method ${method} (known: ${known})`));
           }
-          return handler(params || {});
+          try {
+            return await handler(params || {});
+          } catch (ex) {
+            throw wireError(ex);
+          }
         },
       },
     };
