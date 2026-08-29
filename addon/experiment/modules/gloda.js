@@ -448,6 +448,11 @@ TBX_MODULE_NAMES.push("gloda");
       Math.max((offset + limit) * (inScope ? 10 : 3), 50),
       MAX_RETRIEVE
     );
+    /* Ask the index for one row more than we mean to use. A LIMIT that comes back
+     * exactly full cannot tell "this is everything" from "the cap cut it off", so
+     * testing `length >= retrieve` called a complete result set truncated — which
+     * suppressed the exact total the caller could otherwise have had. One spare
+     * row answers the question outright. */
     const messages = await collect(
       (listener) => {
         // What getCollection() does, minus its pref-driven retrieval limit: the
@@ -455,16 +460,20 @@ TBX_MODULE_NAMES.push("gloda");
         // ours nests inside it.
         searcher.listener = listener;
         searcher.query = searcher.buildFulltextQuery();
-        searcher.query.limit(retrieve);
+        searcher.query.limit(retrieve + 1);
         searcher.collection = searcher.query.getCollection(searcher, null);
       },
       "gloda search",
       SEARCH_TIMEOUT_MS
     );
+    const truncated = messages.length > retrieve;
+    // Drop the probe row so it cannot reach the caller or skew the count.
+    const considered = truncated ? messages.slice(0, retrieve) : messages;
 
-    // searcher.scores accumulates in the order items were handed to us.
+    // searcher.scores accumulates in the order items were handed to us, so it
+    // stays aligned as long as we slice from the front.
     const scores = searcher.scores || [];
-    let hits = messages.map((message, index) => hit(message, scores[index]));
+    let hits = considered.map((message, index) => hit(message, scores[index]));
     if (inScope) {
       hits = hits.filter(inScope);
     }
@@ -475,9 +484,9 @@ TBX_MODULE_NAMES.push("gloda");
       query,
       hits: hits.slice(offset, offset + limit),
       matched: hits.length,
-      retrieved: messages.length,
+      retrieved: considered.length,
       // The ranking only ordered what we retrieved; a deeper page may reorder.
-      truncated: messages.length >= retrieve,
+      truncated,
       indexEnabled: enabled,
     };
     if (unmatchable.length) {
