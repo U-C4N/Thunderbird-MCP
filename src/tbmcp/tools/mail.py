@@ -71,6 +71,11 @@ def register(reg: Registrar) -> None:
         of already-indexed messages; `subject`/`author`/`body` are substring matches
         evaluated per folder. Dates are ISO-8601. Results are summaries — call
         `mail_get` for a body. Continue with `cursor=nextCursor`.
+
+        Case matters unevenly, because Thunderbird matches them differently:
+        `subject` and `body` are case-sensitive substring tests, while `author` and
+        `recipients` are matched as addresses and are not. Searching `subject` for
+        a lowercased word finds only the messages that spell it that way.
         """
         query: dict[str, Any] = {}
         if full_text:

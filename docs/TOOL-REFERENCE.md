@@ -20,6 +20,11 @@ of already-indexed messages; `subject`/`author`/`body` are substring matches
 evaluated per folder. Dates are ISO-8601. Results are summaries — call
 `mail_get` for a body. Continue with `cursor=nextCursor`.
 
+Case matters unevenly, because Thunderbird matches them differently:
+`subject` and `body` are case-sensitive substring tests, while `author` and
+`recipients` are matched as addresses and are not. Searching `subject` for
+a lowercased word finds only the messages that spell it that way.
+
 Parameters: full_text, subject, author, recipients, body, folder_id, account_id, include_subfolders, unread, flagged, junk, has_attachment, tags, tag_mode, from_date, to_date, to_me, from_me, min_size, max_size, limit, cursor  
 *(bold means required; `confirm` is the confirmation gate)*
 

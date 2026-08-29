@@ -67,6 +67,12 @@ filterwarnings = [
   # client that has already dropped support for them.
   "error::mcp.MCPDeprecationWarning",
 ]
+markers = [
+  # Needs a running Thunderbird with the bridge attached. Skips itself when there
+  # is not one, so CI is unaffected; `-m live` runs only these, `-m "not live"`
+  # only the mocked suite.
+  "live: drives a real Thunderbird rather than a recorded bridge",
+]
 
 [tool.ruff]
 line-length = 100
