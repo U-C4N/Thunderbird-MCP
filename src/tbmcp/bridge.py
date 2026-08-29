@@ -113,7 +113,11 @@ class Bridge:
             if info is None:
                 raise TransportError("the daemon vanished right after starting", code="NO_DAEMON")
 
-        reader, writer = await asyncio.open_connection("127.0.0.1", info.port)
+        # `limit` is the stream buffer, and its default is 64 KiB — a thousandth
+        # of the ceiling ipc.MAX_LINE names. Past it `readline()` raises and the
+        # connection dies, so any answer over ~64 KB (a wide search, a bulk read)
+        # dropped the bridge instead of arriving.
+        reader, writer = await asyncio.open_connection("127.0.0.1", info.port, limit=ipc.MAX_LINE)
         self._next_id += 1
         await ipc.write_message(writer, {"t": "auth", "id": self._next_id, "token": info.token})
         reply = await asyncio.wait_for(ipc.read_message(reader), timeout=10.0)

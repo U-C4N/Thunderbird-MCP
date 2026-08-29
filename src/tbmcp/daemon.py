@@ -500,7 +500,9 @@ class Daemon:
 
     async def run(self) -> None:
         async with (
-            await asyncio.start_server(self._serve_control, host="127.0.0.1", port=0) as control,
+            await asyncio.start_server(
+                self._serve_control, host="127.0.0.1", port=0, limit=ipc.MAX_LINE
+            ) as control,
             serve(
                 self._serve_addon, host="127.0.0.1", port=0, max_size=CHUNK_LIMIT * 2
             ) as addon_server,

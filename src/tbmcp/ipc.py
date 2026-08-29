@@ -224,11 +224,20 @@ def new_token() -> str:
 
 
 async def read_message(reader: asyncio.StreamReader) -> dict[str, Any] | None:
-    """Read one newline-delimited JSON object. `None` means the peer hung up."""
+    """Read one newline-delimited JSON object. `None` means the peer hung up.
+
+    Both ends must be opened with `limit=MAX_LINE` (see `open_connection`), or the
+    ceiling is asyncio's 64 KiB default rather than the one below, and `readline`
+    raises `ValueError` instead of ever reaching the size check.
+    """
     try:
         line = await reader.readline()
     except (asyncio.IncompleteReadError, ConnectionResetError):
         return None
+    except ValueError as exc:
+        # The stream buffer filled before a newline arrived. Typed, so a caller
+        # sees a size problem rather than a connection that simply died.
+        raise TransportError("control message exceeded the maximum size", code="TOO_LARGE") from exc
     if not line:
         return None
     if len(line) > MAX_LINE:
