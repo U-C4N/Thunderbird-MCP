@@ -155,6 +155,12 @@ class Bridge:
 
     async def _read_loop(self) -> None:
         assert self._reader is not None
+        # Why the loop ended, when it ended for a reason worth telling the caller.
+        # `read_message` raises TOO_LARGE for an answer that overran the frame
+        # ceiling; flattening that into DISCONNECTED below would put the caller
+        # back where it started, unable to tell an answer that was too big from a
+        # socket that died — and only one of those is worth retrying.
+        failure: BaseException | None = None
         try:
             while True:
                 message = await ipc.read_message(self._reader)
@@ -183,11 +189,16 @@ class Bridge:
                     )
         except (TransportError, OSError) as exc:
             log.debug("control read loop ended: %s", exc)
+            failure = exc
         finally:
             for future in self._pending.values():
                 if not future.done():
+                    # A fresh instance per future: sharing one exception across
+                    # several would splice their tracebacks together.
                     future.set_exception(
-                        TransportError("the daemon connection dropped", code="DISCONNECTED")
+                        TransportError(failure.message, code=failure.code)
+                        if isinstance(failure, TransportError) and failure.code
+                        else TransportError("the daemon connection dropped", code="DISCONNECTED")
                     )
             self._pending.clear()
             self._progress.clear()

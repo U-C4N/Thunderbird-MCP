@@ -8,6 +8,7 @@ import os
 
 import pytest
 
+from tbmcp import bridge as bridge_module
 from tbmcp import ipc
 from tbmcp.errors import TransportError
 
@@ -167,3 +168,45 @@ async def test_an_oversized_frame_is_a_typed_error_not_a_dead_socket() -> None:
     finally:
         server.close()
         await server.wait_closed()
+
+
+async def test_an_oversized_answer_reaches_the_caller_as_too_large() -> None:
+    """Raising TOO_LARGE inside `read_message` is not enough on its own.
+
+    `Bridge._read_loop` catches TransportError and its `finally` clause fails every
+    pending request with DISCONNECTED, so a typed size error was flattened back
+    into "the connection dropped" one layer above — the exact confusion the typed
+    error exists to end. A caller has to be able to tell an answer that was too big
+    from a socket that died, because only one of those is worth retrying.
+    """
+    bridge = bridge_module.Bridge(autostart=False)
+    reader = asyncio.StreamReader(limit=1024)
+    reader.feed_data(b"z" * 4096)  # no newline: the buffer fills and never frames
+    bridge._reader = reader
+
+    pending: asyncio.Future = asyncio.get_running_loop().create_future()
+    bridge._pending[1] = pending
+
+    await bridge._read_loop()
+
+    with pytest.raises(TransportError) as caught:
+        pending.result()
+    assert caught.value.code == "TOO_LARGE", f"surfaced as {caught.value.code}"
+
+
+async def test_a_genuinely_dropped_connection_still_says_so() -> None:
+    """The counterpart: an unexplained end is still DISCONNECTED, which is what
+    `Bridge.call` keys its reconnect-and-retry on."""
+    bridge = bridge_module.Bridge(autostart=False)
+    reader = asyncio.StreamReader()
+    reader.feed_eof()
+    bridge._reader = reader
+
+    pending: asyncio.Future = asyncio.get_running_loop().create_future()
+    bridge._pending[1] = pending
+
+    await bridge._read_loop()
+
+    with pytest.raises(TransportError) as caught:
+        pending.result()
+    assert caught.value.code == "DISCONNECTED"
