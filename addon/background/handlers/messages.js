@@ -230,11 +230,14 @@
     query.messagesPerPage = Math.min(Math.max(limit, 10), 100);
 
     const paged = await collectPage(params.cursor, () => browser.messages.query(query), limit);
-    const result = {
-      messages: paged.messages,
-      cursor: paged.cursor,
-      searchedFolders: await searchedScope(query),
-    };
+    const result = { messages: paged.messages, cursor: paged.cursor };
+    // Only when the walk starts. The scope cannot change mid-walk, and working it
+    // out means enumerating an account's subfolders — which on a large IMAP
+    // account is the most expensive thing this handler does. Paying that on every
+    // page to re-send a constant is waste the caller cannot even see.
+    if (!params.cursor) {
+      result.searchedFolders = await searchedScope(query);
+    }
     if (query.fullText && browser.tbx) {
       // Worth saying: fullText only sees what the global indexer has processed.
       const indexed = await browser.tbx.globalIndexEnabled().catch(() => null);

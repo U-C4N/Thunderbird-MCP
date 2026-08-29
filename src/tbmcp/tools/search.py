@@ -120,6 +120,8 @@ def register(reg: Registrar) -> None:
         `truncated` means the ranking only ordered the slice that was retrieved, so
         a deeper page may reorder and `matched` is a floor rather than a total.
         `totalAvailable` appears only when the whole result set came back.
+        `unmatchableTerms`, when present, lists words the index cannot match at
+        all — drop them and search again rather than concluding there is nothing.
         """
         if not query or not query.strip():
             raise UsageError("query is required — pass the words to search for.")
@@ -146,6 +148,14 @@ def register(reg: Registrar) -> None:
         # only do it when the whole result set came back.
         truncated = bool(result.get("truncated"))
         matched = result.get("matched")
+        extra: dict[str, Any] = {}
+        # Terms the index cannot match at all — "2.0" tokenizes to "2" and "0",
+        # both below the length floor — which under the default AND take the whole
+        # query down with them. The note explains it in prose; this is the same
+        # thing as data, so a caller can drop those words and retry without
+        # parsing a sentence.
+        if result.get("unmatchableTerms"):
+            extra["unmatchableTerms"] = result["unmatchableTerms"]
         return page(
             hits,
             total=None if truncated else matched,
@@ -155,6 +165,7 @@ def register(reg: Registrar) -> None:
             indexEnabled=result.get("indexEnabled"),
             note=result.get("note"),
             query=query,
+            **extra,
         )
 
     @reg.read_tool(title="Read a whole conversation", meta=large_output())

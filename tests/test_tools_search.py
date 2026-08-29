@@ -181,3 +181,31 @@ async def test_global_search_forwards_the_folder_scope(fake_bridge) -> None:
     params = bridge.params_for("x.gloda.search")
     assert params["folderId"] == "account1://INBOX"
     assert params["offset"] == 10
+
+
+async def test_unmatchable_terms_reach_the_caller(fake_bridge) -> None:
+    """The privileged half names the words the index cannot match; a caller that
+    only gets them inside a prose `note` has to parse a sentence to act on it."""
+    bridge = fake_bridge(
+        {
+            "x.gloda.search": {
+                "hits": [],
+                "matched": 0,
+                "indexEnabled": True,
+                "note": 'The index cannot match "2.0" — it tokenizes into pieces…',
+                "unmatchableTerms": ["2.0"],
+            }
+        }
+    )
+    async with Client(_server(bridge)) as client:
+        result = await client.call_tool("search_global", {"query": "widget 2.0"})
+
+    assert result.structured_content["unmatchableTerms"] == ["2.0"]
+
+
+async def test_a_searchable_query_carries_no_unmatchable_terms(fake_bridge) -> None:
+    bridge = fake_bridge({"x.gloda.search": {"hits": [HIT], "matched": 1, "indexEnabled": True}})
+    async with Client(_server(bridge)) as client:
+        result = await client.call_tool("search_global", {"query": "widget"})
+
+    assert "unmatchableTerms" not in result.structured_content

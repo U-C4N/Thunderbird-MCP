@@ -132,12 +132,17 @@ def register(reg: Registrar) -> None:
             },
             timeout=90.0,
         )
+        # `searchedFolders` is reported when a walk starts, not on every page of
+        # it: the scope cannot change mid-walk, and computing it costs a subfolder
+        # enumeration. Omit the key rather than send a null, which would read as
+        # "scope unknown" instead of "already told you".
+        scope = result.get("searchedFolders")
         return page(
             [message_summary(m) for m in result.get("messages", [])],
             cursor=result.get("cursor"),
             total=result.get("totalAvailable"),
-            searchedFolders=result.get("searchedFolders"),
             indexNote=result.get("indexNote"),
+            **({"searchedFolders": scope} if scope is not None else {}),
         )
 
     @reg.read_tool(title="List a folder")

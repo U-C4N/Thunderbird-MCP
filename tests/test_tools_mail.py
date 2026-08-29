@@ -211,3 +211,31 @@ async def test_get_many_has_a_ceiling(fake_bridge) -> None:
         result = await client.call_tool("mail_get_many", {"message_ids": list(range(51))})
     assert result.is_error
     assert "50" in _text(result)
+
+
+async def test_search_reports_the_scope_it_searched(fake_bridge) -> None:
+    """An empty result is only interpretable next to what was actually searched."""
+    scope = {
+        "scope": "folders",
+        "accountIds": ["account1"],
+        "folderIds": ["account1://INBOX"],
+        "includeSubFolders": True,
+    }
+    bridge = fake_bridge({"messages.query": {"messages": [], "searchedFolders": scope}})
+    async with Client(_server(bridge)) as client:
+        result = await client.call_tool("mail_search", {"subject": "nothing", "limit": 5})
+
+    assert result.structured_content["searchedFolders"] == scope
+
+
+async def test_continuing_a_search_does_not_restate_the_scope(fake_bridge) -> None:
+    """The add-on computes the scope only when a walk starts, because it cannot
+    change mid-walk and costs a subfolder enumeration. The key is then absent
+    rather than null: null would read as "scope unknown"."""
+    bridge = fake_bridge({"messages.query": {"messages": [], "cursor": None}})
+    async with Client(_server(bridge)) as client:
+        result = await client.call_tool(
+            "mail_search", {"subject": "nothing", "cursor": "list-1", "limit": 5}
+        )
+
+    assert "searchedFolders" not in result.structured_content

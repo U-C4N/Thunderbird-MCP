@@ -395,6 +395,8 @@ indexer can be disabled or still catching up.
 `truncated` means the ranking only ordered the slice that was retrieved, so
 a deeper page may reorder and `matched` is a floor rather than a total.
 `totalAvailable` appears only when the whole result set came back.
+`unmatchableTerms`, when present, lists words the index cannot match at
+all — drop them and search again rather than concluding there is nothing.
 
 Parameters: **query**, limit, offset, folder_id  
 *(bold means required; `confirm` is the confirmation gate)*
