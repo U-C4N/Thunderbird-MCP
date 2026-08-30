@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import importlib
 import inspect
 import logging
@@ -9,15 +10,42 @@ from collections.abc import Callable
 from typing import Any, TypeVar
 
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
 from . import safety
 from .bridge import Bridge, set_shared_bridge
 from .config import ALL_TOOLSETS, Settings
+from .errors import TbmcpError
 
 log = logging.getLogger("tbmcp.server")
 
 F = TypeVar("F", bound=Callable[..., Any])
+
+
+def _speaking_errors(fn: F) -> F:
+    """Re-raise our own failures as the SDK's `ToolError`, which keeps the message.
+
+    An unrecognised exception is wrapped by mcp 2.1 as
+    `UnexpectedToolError("Error executing tool <name>")`, with the text dropped —
+    reasonably, since a stray exception's message is not written for a model to
+    read. Ours are: every `TbmcpError` says what the caller should do differently,
+    and losing that turns "pass at least one filter, `full_text` is usually what
+    you want" back into "something went wrong".
+
+    Raising `ToolError` is how a server says the message is deliberate. It is
+    understood by 2.0 and 2.1 alike, so this does not pin the dependency floor.
+    """
+
+    @functools.wraps(fn)
+    async def speaking(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return await fn(*args, **kwargs)
+        except TbmcpError as exc:
+            raise ToolError(str(exc)) from exc
+
+    return speaking  # type: ignore[return-value]
+
 
 # Claude Code truncates server instructions at 2 KB, and with tool search on this
 # text is the primary discovery signal. Lead with what matters.
@@ -69,7 +97,7 @@ class Registrar:
             self.skipped.append(fn.__name__)
             return fn
         self.mcp.add_tool(
-            fn,
+            _speaking_errors(fn),
             title=title,
             # Normalise the docstring ourselves rather than letting the interpreter
             # decide: CPython 3.13 strips common leading whitespace from `__doc__` at
