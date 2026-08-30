@@ -210,3 +210,37 @@ async def test_a_genuinely_dropped_connection_still_says_so() -> None:
     with pytest.raises(TransportError) as caught:
         pending.result()
     assert caught.value.code == "DISCONNECTED"
+
+
+class _StubWriter:
+    """Just enough asyncio.StreamWriter for `_ensure`'s health test."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+    def is_closing(self) -> bool:
+        return self.closed
+
+
+async def test_the_read_pump_exiting_invalidates_the_connection() -> None:
+    """`_ensure` judges the connection by the writer alone, so a pump that has
+    stopped leaves it looking healthy.
+
+    The next call then posts its request into a socket nobody is reading and waits
+    out its whole timeout — 90s for mail_search, 120s for search_global — and so
+    does every call after it, because nothing ever reopens the connection. One
+    oversized answer wedged the bridge permanently.
+    """
+    bridge = bridge_module.Bridge(autostart=False)
+    reader = asyncio.StreamReader(limit=1024)
+    reader.feed_data(b"z" * 4096)  # overruns the frame ceiling, ending the pump
+    bridge._reader = reader
+    bridge._writer = _StubWriter()
+
+    await bridge._read_loop()
+
+    healthy = bridge._writer is not None and not bridge._writer.is_closing()
+    assert not healthy, "a stopped pump must not leave the connection looking usable"

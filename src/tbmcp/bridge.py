@@ -191,6 +191,19 @@ class Bridge:
             log.debug("control read loop ended: %s", exc)
             failure = exc
         finally:
+            # Nothing will read a reply once the pump is gone, so retire the
+            # connection here. `_ensure` judges health by the writer alone and
+            # would otherwise post the next request into a socket no one is
+            # reading, then wait out its whole timeout — and do the same for every
+            # call after it, since nothing reopens the connection on its own.
+            #
+            # Only `close()`: that flips `is_closing()`, which is exactly what
+            # `_ensure` tests, and leaves `_teardown` to do the real shutdown with
+            # its `wait_closed()`. Calling `_teardown` from here would deadlock,
+            # since it cancels this task and awaits it.
+            if self._writer is not None:
+                with contextlib.suppress(Exception):
+                    self._writer.close()
             for future in self._pending.values():
                 if not future.done():
                     # A fresh instance per future: sharing one exception across
