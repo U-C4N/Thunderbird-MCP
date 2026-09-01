@@ -426,19 +426,40 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
 _JSON_CONTRACT_ARGV: list[str] | None = None
 
 
-def _subcommand_of(argv: list[str]) -> str | None:
-    """Which subcommand `argv` selects, worked out without parsing it.
+class _Probe(argparse.ArgumentParser):
+    """A parser that answers a question instead of exiting on it."""
 
-    The first token that is not an option. That is only the subcommand while no
-    top-level option consumes a value — otherwise `tbmcp tools --profile doctor` would
-    read as `doctor`, and a `tools --json` caller would be handed a doctor-shaped
-    report to misread. None do; `test_the_top_level_parser_takes_no_option_values`
-    fails if that ever stops being true.
+    def error(self, message: str) -> NoReturn:
+        raise ValueError(message)
+
+
+def _wants_doctor_json(argv: list[str]) -> bool:
+    """Whether `argv` asked for `doctor --json`, decided by argparse rather than by eye.
+
+    argparse refuses a malformed flag mid-parse, so there is no namespace left to
+    consult — but the question can still be put to a parser, just a lenient one.
+
+    Reading argv by hand instead got this wrong twice. A subcommand is not simply the
+    first bare word, because an option can take one as its value (`tools --profile
+    doctor` is not the doctor command); and a long option may be abbreviated, so
+    `--js` is `--json` and a raw token comparison never sees it. Both follow for free
+    from asking argparse.
+
+    The probe carries only what the question needs, so its abbreviation matching is
+    looser than the real parser's. That can only widen what counts as `--json` on a
+    command line that was already going to be refused, which is the harmless
+    direction — the damaging one is answering for the wrong subcommand, and `command`
+    is positional, so it is decided the same way in both.
     """
-    for token in argv:
-        if not token.startswith("-"):
-            return token
-    return None
+    probe = _Probe(add_help=False)
+    probe.add_argument("command", nargs="?")
+    probe.add_argument("--json", action="store_true")
+    try:
+        known, _rest = probe.parse_known_args(argv)
+    except ValueError:
+        # An argv the probe cannot read is one this has no business answering for.
+        return False
+    return known.command == "doctor" and bool(known.json)
 
 
 class _Parser(argparse.ArgumentParser):
@@ -455,7 +476,7 @@ class _Parser(argparse.ArgumentParser):
 
     def error(self, message: str) -> NoReturn:
         argv = _JSON_CONTRACT_ARGV
-        if argv is not None and _subcommand_of(argv) == "doctor" and "--json" in argv:
+        if argv is not None and _wants_doctor_json(argv):
             print(
                 json.dumps(
                     {

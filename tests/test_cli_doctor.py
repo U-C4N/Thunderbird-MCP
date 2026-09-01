@@ -16,7 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tbmcp.cli import _doctor_ok, build_parser, cmd_doctor, main
+from tbmcp.cli import _doctor_ok, _wants_doctor_json, build_parser, cmd_doctor, main
 
 # ------------------------------------------------------------------- _doctor_ok
 
@@ -159,6 +159,9 @@ def test_a_refused_flag_says_so_in_the_human_readable_output_too(capsys):
     [
         ["doctor", "--json", "--timeout", "bogus"],
         ["doctor", "--json", "--nosuchflag"],
+        # argparse accepts unambiguous long-option abbreviations, so this is a real
+        # `--json` request that a raw token comparison never recognised.
+        ["doctor", "--js", "--timeout", "bogus"],
     ],
 )
 @pytest.mark.usefixtures("_clean_tbmcp_env")
@@ -198,19 +201,23 @@ def test_another_subcommand_never_gets_a_doctor_shaped_report(capsys, argv):
     assert capsys.readouterr().out == "", "a doctor report escaped into another command"
 
 
-def test_the_top_level_parser_takes_no_option_values():
-    """`_subcommand_of` reads the first non-option token as the subcommand, which is
-    sound only while no top-level option swallows the token after it. Adding one would
-    silently misaim the doctor JSON contract rather than break anything visibly, so
-    the assumption is pinned here rather than left in a comment.
-    """
-    for action in build_parser()._actions:
-        if action.option_strings:
-            assert action.nargs == 0, (
-                f"{action.option_strings} consumes a value, so the first non-option "
-                "token is no longer necessarily the subcommand — _subcommand_of needs "
-                "to account for it"
-            )
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["doctor", "--json"], True),
+        (["doctor", "--js"], True),  # argparse abbreviates unambiguous long options
+        (["-v", "doctor", "--json"], True),
+        (["doctor"], False),  # --json not asked for
+        (["tools", "--json"], False),  # a different subcommand
+        (["tools", "--profile", "doctor", "--json"], False),  # "doctor" as an option value
+        ([], False),
+    ],
+)
+def test_wants_doctor_json_matches_what_argparse_would_do(argv, expected):
+    """The predicate that aims the whole contract. Reading argv by hand got the last
+    two entries wrong in opposite directions — one missed a real request, the other
+    claimed one that was never made."""
+    assert _wants_doctor_json(argv) is expected
 
 
 @pytest.mark.usefixtures("_clean_tbmcp_env")
