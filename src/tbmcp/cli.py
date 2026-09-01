@@ -426,6 +426,21 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
 _JSON_CONTRACT_ARGV: list[str] | None = None
 
 
+def _subcommand_of(argv: list[str]) -> str | None:
+    """Which subcommand `argv` selects, worked out without parsing it.
+
+    The first token that is not an option. That is only the subcommand while no
+    top-level option consumes a value — otherwise `tbmcp tools --profile doctor` would
+    read as `doctor`, and a `tools --json` caller would be handed a doctor-shaped
+    report to misread. None do; `test_the_top_level_parser_takes_no_option_values`
+    fails if that ever stops being true.
+    """
+    for token in argv:
+        if not token.startswith("-"):
+            return token
+    return None
+
+
 class _Parser(argparse.ArgumentParser):
     """An `ArgumentParser` that keeps `doctor --json`'s contract when it refuses a flag.
 
@@ -440,7 +455,7 @@ class _Parser(argparse.ArgumentParser):
 
     def error(self, message: str) -> NoReturn:
         argv = _JSON_CONTRACT_ARGV
-        if argv is not None and "doctor" in argv and "--json" in argv:
+        if argv is not None and _subcommand_of(argv) == "doctor" and "--json" in argv:
             print(
                 json.dumps(
                     {

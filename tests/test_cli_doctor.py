@@ -179,6 +179,40 @@ def test_argparse_refusals_also_produce_a_json_report(capsys, argv):
     assert "error:" in captured.err
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["tools", "--profile", "doctor", "--json", "--bad"],
+        ["setup", "--profile", "doctor", "--json", "--bad"],
+    ],
+)
+@pytest.mark.usefixtures("_clean_tbmcp_env")
+def test_another_subcommand_never_gets_a_doctor_shaped_report(capsys, argv):
+    """The first version of this asked whether the words "doctor" and "--json" both
+    appeared anywhere in argv, which `--profile doctor` satisfies. A `tools --json`
+    caller would then receive a doctor report on stdout and have every reason to parse
+    it as its own — a worse failure than the empty stdout this feature set out to fix.
+    """
+    with pytest.raises(SystemExit):
+        main(argv)
+    assert capsys.readouterr().out == "", "a doctor report escaped into another command"
+
+
+def test_the_top_level_parser_takes_no_option_values():
+    """`_subcommand_of` reads the first non-option token as the subcommand, which is
+    sound only while no top-level option swallows the token after it. Adding one would
+    silently misaim the doctor JSON contract rather than break anything visibly, so
+    the assumption is pinned here rather than left in a comment.
+    """
+    for action in build_parser()._actions:
+        if action.option_strings:
+            assert action.nargs == 0, (
+                f"{action.option_strings} consumes a value, so the first non-option "
+                "token is no longer necessarily the subcommand — _subcommand_of needs "
+                "to account for it"
+            )
+
+
 @pytest.mark.usefixtures("_clean_tbmcp_env")
 def test_help_and_version_are_not_treated_as_refusals(capsys):
     """`--help` also leaves through `SystemExit`, with code 0. Emitting a failure
