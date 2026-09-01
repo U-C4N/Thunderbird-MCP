@@ -112,10 +112,13 @@ def _doctor_ok(report: dict) -> bool:
     real MCP tool-calling machinery, the same path a client uses) have to say
     `connected`. Checking only one would let the other silently regress unnoticed.
 
-    Exception: when the `admin` toolset was deselected, `tb_status` was never
-    registered at all — `report["tbStatusCall"]` then carries `skipped`, not
-    `connected` or `error`. That is a supported configuration, not a broken chain,
-    so it must not sink `ok` the way a genuine dispatch failure would.
+    Exception: when `tb_status` was never registered — the `admin` toolset is not
+    selected and `--tools` does not name it — `report["tbStatusCall"]` carries
+    `skipped`, not `connected` or `error`. That is a supported configuration, not a
+    broken chain, so it must not sink `ok` the way a genuine dispatch failure would.
+    Note that this hinges on `cmd_doctor` skipping only when the tool really is
+    absent: a skip recorded for a tool that *was* registered would turn this
+    exemption into a way to pass without testing anything.
     """
     bridge_state = report.get("bridge")
     tool_call = report.get("tbStatusCall")
@@ -187,13 +190,22 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         set_shared_bridge(bridge)
         try:
             mcp = build_server(settings, bridge=bridge)
-            if "admin" not in settings.toolsets:
-                # tb_status lives in the admin toolset. Calling it anyway would just
-                # raise `ToolError: Unknown tool: tb_status` — indistinguishable, to a
-                # naive check, from the tool genuinely failing. Record the real reason
-                # instead of dispatching a call we already know cannot succeed.
+            # Ask the server what it registered rather than predicting it from the
+            # toolset selection. `--tools tb_status` registers the tool without
+            # selecting `admin`, so the two questions stopped being the same one —
+            # and answering the wrong one here means reporting a healthy chain
+            # without ever having exercised it.
+            registered = {tool.name for tool in await mcp.list_tools()}
+            if "tb_status" not in registered:
+                # Dispatching anyway would just raise `ToolError: Unknown tool:
+                # tb_status` — indistinguishable, to a naive check, from the tool
+                # genuinely failing. Record the real reason instead of making a call
+                # we already know cannot succeed.
                 report["tbStatusCall"] = {
-                    "skipped": "admin toolset not selected; tb_status is not registered"
+                    "skipped": (
+                        "tb_status is not registered (the admin toolset is not "
+                        "selected and --tools does not name it)"
+                    )
                 }
             else:
                 result = await mcp.call_tool("tb_status", {})

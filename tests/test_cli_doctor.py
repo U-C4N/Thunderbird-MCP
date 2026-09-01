@@ -46,7 +46,7 @@ def test_doctor_ok_true_when_admin_toolset_deselected_and_bridge_is_healthy():
     """
     report = {
         "bridge": {"connected": True},
-        "tbStatusCall": {"skipped": "admin toolset not selected; tb_status is not registered"},
+        "tbStatusCall": {"skipped": "tb_status is not registered"},
     }
     assert _doctor_ok(report) is True
 
@@ -56,7 +56,7 @@ def test_doctor_ok_false_when_admin_deselected_but_bridge_is_not_connected():
     genuinely disconnected bridge."""
     report = {
         "bridge": {"connected": False},
-        "tbStatusCall": {"skipped": "admin toolset not selected; tb_status is not registered"},
+        "tbStatusCall": {"skipped": "tb_status is not registered"},
     }
     assert _doctor_ok(report) is False
 
@@ -80,6 +80,29 @@ def _clean_tbmcp_env(monkeypatch):
         "TBMCP_TOOLS",
     ):
         monkeypatch.delenv(var, raising=False)
+
+
+class FakeMCP:
+    """Stands in for the built server.
+
+    `cmd_doctor` asks it what is registered before deciding whether to probe, so a
+    test says which tools exist rather than the fake re-deriving it from settings —
+    re-deriving would mean the fake and the code under test could agree while both
+    being wrong.
+    """
+
+    def __init__(self, tools: list[str], *, record: list | None = None, connected: bool = True):
+        self._tools = tools
+        self._record = record
+        self._connected = connected
+
+    async def list_tools(self):
+        return [SimpleNamespace(name=name) for name in self._tools]
+
+    async def call_tool(self, name, args):
+        if self._record is not None:
+            self._record.append(name)
+        return SimpleNamespace(structured_content={"connected": self._connected})
 
 
 def _stub_common(monkeypatch, *, bridge_status: dict) -> tuple[list, list]:
@@ -130,13 +153,9 @@ def test_no_start_reuses_the_one_bridge_and_never_autostarts_a_second(monkeypatc
     created_bridges = _stub_common(monkeypatch, bridge_status={"connected": True})
     build_server_calls: list = []
 
-    class FakeMCP:
-        async def call_tool(self, name, args):
-            return SimpleNamespace(structured_content={"connected": True})
-
     def fake_build_server(settings, *, bridge=None):
         build_server_calls.append(bridge)
-        return FakeMCP()
+        return FakeMCP(["tb_status"])
 
     monkeypatch.setattr("tbmcp.server.build_server", fake_build_server)
 
@@ -167,14 +186,9 @@ def test_admin_toolset_deselected_does_not_dispatch_tb_status_and_still_reports_
     call_tool_invocations: list = []
     build_server_settings: list = []
 
-    class FakeMCP:
-        async def call_tool(self, name, args):
-            call_tool_invocations.append(name)
-            return SimpleNamespace(structured_content={"connected": True})
-
     def fake_build_server(settings, *, bridge=None):
         build_server_settings.append(settings)
-        return FakeMCP()
+        return FakeMCP([], record=call_tool_invocations)
 
     monkeypatch.setattr("tbmcp.server.build_server", fake_build_server)
 
@@ -190,15 +204,48 @@ def test_admin_toolset_deselected_does_not_dispatch_tb_status_and_still_reports_
 
 
 @pytest.mark.usefixtures("_clean_tbmcp_env")
+def test_tb_status_named_with_tools_is_probed_even_without_the_admin_toolset(monkeypatch):
+    """`--tools tb_status` registers the tool with `admin` deselected, so deciding the
+    probe on toolset membership skipped a tool that was really there — and `_doctor_ok`
+    treats a skip as "not a broken chain". `doctor` therefore reported a healthy chain
+    it had never exercised, and `bootstrap`'s verify step said the check had not run.
+
+    The probe now keys off what the server actually registered.
+    """
+    _stub_common(monkeypatch, bridge_status={"connected": True})
+    call_tool_invocations: list = []
+    build_server_settings: list = []
+
+    def fake_build_server(settings, *, bridge=None):
+        build_server_settings.append(settings)
+        return FakeMCP(["tb_status"], record=call_tool_invocations)
+
+    monkeypatch.setattr("tbmcp.server.build_server", fake_build_server)
+
+    args = build_parser().parse_args(
+        ["doctor", "--json", "--toolsets", "mail", "--tools", "tb_status"]
+    )
+    exit_code = cmd_doctor(args)
+
+    settings = build_server_settings[0]
+    assert "admin" not in settings.toolsets
+    assert settings.extra_tools == ("tb_status",)
+    assert call_tool_invocations == ["tb_status"], (
+        "a tool named in --tools is registered, so doctor must actually exercise it "
+        "rather than reporting success on a check it skipped"
+    )
+    assert exit_code == 0
+
+
+@pytest.mark.usefixtures("_clean_tbmcp_env")
 def test_returns_nonzero_when_the_bridge_is_genuinely_not_connected(monkeypatch):
     """Sanity check on the other side of item 4: a real problem must still fail."""
     _stub_common(monkeypatch, bridge_status={"connected": False})
 
-    class FakeMCP:
-        async def call_tool(self, name, args):
-            return SimpleNamespace(structured_content={"connected": False})
-
-    monkeypatch.setattr("tbmcp.server.build_server", lambda settings, *, bridge=None: FakeMCP())
+    monkeypatch.setattr(
+        "tbmcp.server.build_server",
+        lambda settings, *, bridge=None: FakeMCP(["tb_status"], connected=False),
+    )
 
     args = build_parser().parse_args(["doctor", "--json"])
     exit_code = cmd_doctor(args)

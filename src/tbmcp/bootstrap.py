@@ -667,12 +667,12 @@ def _step_verify(options: Options, state: dict, run: Runner) -> tuple[str, str]:
         return "failed", output.strip() or "doctor reported a problem"
     tool_call = payload.get("tbStatusCall")
     if isinstance(tool_call, dict) and tool_call.get("skipped"):
-        # A deselected `admin` toolset is a supported configuration, not a broken
+        # A configuration without `tb_status` registered is supported, not a broken
         # chain — `doctor`'s own `ok` already accounts for it (see `_doctor_ok`).
         # Say so here too, rather than claiming a check that never ran.
         return (
             "ok",
-            "doctor: healthy (bridge connected; tb_status not checked — admin toolset not selected)",
+            "doctor: healthy (bridge connected; tb_status not checked — it is not registered)",
         )
     return "ok", "doctor: healthy (bridge connected, tb_status tool call verified)"
 
