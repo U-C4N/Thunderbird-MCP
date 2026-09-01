@@ -175,3 +175,22 @@ def test_named_tools_survive_into_a_client_config() -> None:
 def test_a_plain_config_gains_no_tools_flag() -> None:
     _, args = clients.server_command(Settings())
     assert "--tools" not in args
+
+
+# ------------------------------------------------------------------------ CLI wiring
+
+
+@pytest.mark.parametrize("subcommand", ["serve", "doctor", "setup", "tools", "bootstrap"])
+def test_tools_is_a_real_flag_wherever_toolsets_is(subcommand: str) -> None:
+    """argparse accepts any unambiguous prefix, and `--tools` is a prefix of
+    `--toolsets`. A subparser that has one and not the other therefore does not
+    reject `--tools mail_draft_save` — it silently reads it as a toolset named
+    `mail_draft_save`, which fails later in a different command, or on a dry run gets
+    printed back as the command to rerun. Nothing about the failure points at the
+    flag that caused it.
+    """
+    from tbmcp.cli import build_parser
+
+    args = build_parser().parse_args([subcommand, "--tools", "mail_draft_save"])
+    assert getattr(args, "tools", None) == "mail_draft_save"
+    assert getattr(args, "toolsets", None) is None, "swallowed as an abbreviation"

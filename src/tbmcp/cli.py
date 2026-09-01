@@ -488,6 +488,11 @@ def build_parser() -> argparse.ArgumentParser:
     boot.add_argument("--venv")
     boot.add_argument("--clients", help="comma separated; default: auto-detect installed clients")
     boot.add_argument("--toolsets")
+    # Needed even though bootstrap only forwards it. argparse accepts any unambiguous
+    # prefix, so without this `--tools X` is silently read as `--toolsets X` and travels
+    # on as a toolset name — failing later, in a different command, with a message that
+    # names something the caller never typed.
+    boot.add_argument("--tools")
     boot.add_argument("--source")
     boot.add_argument("--skip-addon", action="store_true")
     boot.add_argument("--dry-run", action="store_true")
