@@ -16,7 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tbmcp.cli import _doctor_ok, build_parser, cmd_doctor
+from tbmcp.cli import _doctor_ok, build_parser, cmd_doctor, main
 
 # ------------------------------------------------------------------- _doctor_ok
 
@@ -152,6 +152,49 @@ def test_a_refused_flag_says_so_in_the_human_readable_output_too(capsys):
     out = capsys.readouterr().out
     assert "configuration rejected" in out
     assert "bogus" in out
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["doctor", "--json", "--timeout", "bogus"],
+        ["doctor", "--json", "--nosuchflag"],
+    ],
+)
+@pytest.mark.usefixtures("_clean_tbmcp_env")
+def test_argparse_refusals_also_produce_a_json_report(capsys, argv):
+    """`cmd_doctor` guards the refusals it can see, but argparse rejects a malformed
+    command line before any subcommand runs — and exited with usage on stderr and
+    nothing on stdout, which is the same broken contract one layer earlier.
+    """
+    with pytest.raises(SystemExit) as caught:
+        main(argv)
+
+    assert caught.value.code == 2
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["ok"] is False
+    assert payload["configError"]
+    # argparse's own message is the useful one; a person should not have to read JSON.
+    assert "error:" in captured.err
+
+
+@pytest.mark.usefixtures("_clean_tbmcp_env")
+def test_help_and_version_are_not_treated_as_refusals(capsys):
+    """`--help` also leaves through `SystemExit`, with code 0. Emitting a failure
+    report for it would turn a successful command into a broken one."""
+    with pytest.raises(SystemExit) as caught:
+        main(["doctor", "--help"])
+    assert caught.value.code == 0
+    assert "configError" not in capsys.readouterr().out
+
+
+def test_the_parser_alone_keeps_argparse_behaviour(capsys):
+    """The contract belongs to `main`, which knows the real command line. A parser
+    driven directly — every other test in this repo — must be unaffected."""
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["doctor", "--json", "--timeout", "bogus"])
+    assert capsys.readouterr().out == ""
 
 
 @pytest.mark.usefixtures("_clean_tbmcp_env")

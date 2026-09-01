@@ -16,6 +16,7 @@ import logging
 import os
 import sys
 from collections.abc import Sequence
+from typing import NoReturn
 
 from .config import ALL_TOOLSETS, Settings, parse_toolsets
 
@@ -418,8 +419,49 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
 # ------------------------------------------------------------------------ parser
 
 
+#: The command line `main()` is parsing, or `None` when the parser is driven directly
+#: (from a test, say). `_Parser.error` has to consult it: argparse refuses a flag
+#: *during* parsing, so there is no namespace left to ask whether `--json` was wanted —
+#: only the words that were typed.
+_JSON_CONTRACT_ARGV: list[str] | None = None
+
+
+class _Parser(argparse.ArgumentParser):
+    """An `ArgumentParser` that keeps `doctor --json`'s contract when it refuses a flag.
+
+    `cmd_doctor` guards the two places it can itself reject a configuration, but
+    argparse rejects a malformed command line before any subcommand runs — an unknown
+    option, or `--timeout bogus` — and exits with usage on stderr and nothing on
+    stdout. That is the same broken contract, reached one layer earlier.
+
+    `add_subparsers` builds subparsers from the calling parser's class, so a rejection
+    at either level arrives here.
+    """
+
+    def error(self, message: str) -> NoReturn:
+        argv = _JSON_CONTRACT_ARGV
+        if argv is not None and "doctor" in argv and "--json" in argv:
+            print(
+                json.dumps(
+                    {
+                        "python": sys.version.split()[0],
+                        "executable": sys.executable,
+                        "configError": message,
+                        "ok": False,
+                    },
+                    indent=2,
+                )
+            )
+            # Say it on stderr as well. Machine-readable output is the point, but a
+            # person at a terminal should not have to read a JSON blob to find out
+            # they mistyped a flag — and argparse's own message is the good one.
+            sys.stderr.write(f"{self.prog}: error: {message}\n")
+            self.exit(2)
+        super().error(message)
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _Parser(
         prog="tbmcp",
         description="MCP server for Thunderbird. With no subcommand, serves over stdio.",
     )
@@ -537,9 +579,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     # Bare `tbmcp` is how an MCP client launches us.
     if not argv or (argv[0].startswith("-") and argv[0] not in ("-h", "--help", "-v", "--verbose")):
         argv = ["serve", *argv]
-    args = parser.parse_args(argv)
-    if not getattr(args, "func", None):
-        args = parser.parse_args(["serve", *argv])
+    global _JSON_CONTRACT_ARGV
+    _JSON_CONTRACT_ARGV = argv
+    try:
+        args = parser.parse_args(argv)
+        if not getattr(args, "func", None):
+            args = parser.parse_args(["serve", *argv])
+    finally:
+        # Only set while `main` owns the parse, so a test driving `build_parser()`
+        # directly gets argparse's ordinary behaviour.
+        _JSON_CONTRACT_ARGV = None
 
     _configure_logging(getattr(args, "verbose", False) or os.environ.get("TBMCP_DEBUG") == "1")
     try:
