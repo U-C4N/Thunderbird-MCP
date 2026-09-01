@@ -107,7 +107,12 @@ class Settings:
     autostart_daemon: bool = True
     max_result_chars: int = 120_000
     extra_tools: tuple[str, ...] = field(default_factory=tuple)
-    """Individual tools to add on top of the selected toolsets."""
+    """Individual tools to add on top of the selected toolsets.
+
+    Naming a tool here also exempts it from `read_only`, which is the point: it is
+    how an otherwise read-only server is allowed to save a draft without also being
+    allowed to send one.
+    """
 
     # ------------------------------------------------------------------ parsing
 
@@ -129,9 +134,7 @@ class Settings:
             profile=os.environ.get("TBMCP_PROFILE") or None,
             default_timeout=float(os.environ.get("TBMCP_TIMEOUT", "30") or 30),
             autostart_daemon=not cls._flag("TBMCP_NO_AUTOSTART", False),
-            extra_tools=tuple(
-                t.strip() for t in (os.environ.get("TBMCP_TOOLS") or "").split(",") if t.strip()
-            ),
+            extra_tools=parse_tools(os.environ.get("TBMCP_TOOLS")),
         )
 
     def merged_with(self, **overrides: object) -> Settings:
@@ -159,6 +162,20 @@ class Settings:
             f"{name} is outside the reviewed preference allowlist. Start the server with "
             "--unsafe-prefs to permit it."
         )
+
+
+def parse_tools(raw: str | None) -> tuple[str, ...]:
+    """`"mail_draft_save,mail_compose_open"` -> the names, de-duplicated in order.
+
+    Unlike toolsets these cannot be validated here — which tools exist is only known
+    once the modules are imported — so `build_server` reports an unknown name.
+    """
+    seen: list[str] = []
+    for token in (raw or "").split(","):
+        name = token.strip()
+        if name and name not in seen:
+            seen.append(name)
+    return tuple(seen)
 
 
 def parse_toolsets(raw: str | None) -> tuple[str, ...]:

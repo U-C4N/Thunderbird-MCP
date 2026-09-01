@@ -364,6 +364,7 @@ class Options:
     venv: pathlib.Path | None = None
     clients: tuple[str, ...] = ()
     toolsets: str | None = None
+    tools: str | None = None
     json_out: bool = False
     dry_run: bool = False
     skip_addon: bool = False
@@ -636,6 +637,8 @@ def _step_clients(options: Options, state: dict, run: Runner) -> tuple[str, str]
     argv = [state["venv_python"], "-m", "tbmcp", "setup", *clients]
     if options.toolsets:
         argv += ["--toolsets", options.toolsets]
+    if options.tools:
+        argv += ["--tools", options.tools]
     status, output = run(argv)
     if status != 0:
         return "failed", output.strip() or "client setup failed"
@@ -656,6 +659,8 @@ def _step_verify(options: Options, state: dict, run: Runner) -> tuple[str, str]:
     argv = [state["venv_python"], "-m", "tbmcp", "doctor", "--json"]
     if options.toolsets:
         argv += ["--toolsets", options.toolsets]
+    if options.tools:
+        argv += ["--tools", options.tools]
     status, output = run(argv)
     payload = _json_field_report(output)
     if status != 0 or payload is None or not payload.get("ok"):
@@ -748,6 +753,8 @@ def _rerun_without_dry_run(options: Options) -> str:
         parts.append(f"--clients {','.join(options.clients)}")
     if options.toolsets:
         parts.append(f"--toolsets {options.toolsets}")
+    if options.tools:
+        parts.append(f"--tools {options.tools}")
     if options.source:
         parts.append(f'--source "{options.source}"')
     if options.skip_addon:
@@ -812,6 +819,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--venv", type=pathlib.Path, help="where to put the environment")
     parser.add_argument("--clients", help="comma separated; default: auto-detect installed clients")
     parser.add_argument("--toolsets", help="passed through to setup")
+    parser.add_argument("--tools", help="passed through to setup")
     parser.add_argument("--source", help=f"install from here (default: {GIT_SOURCE})")
     parser.add_argument("--skip-addon", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -824,6 +832,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             venv=args.venv,
             clients=tuple(c.strip() for c in (args.clients or "").split(",") if c.strip()),
             toolsets=args.toolsets,
+            tools=args.tools,
             json_out=args.json_out,
             dry_run=args.dry_run,
             skip_addon=args.skip_addon,

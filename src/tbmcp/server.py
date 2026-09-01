@@ -55,6 +55,15 @@ class Registrar:
         self.settings = settings
         self.registered: list[str] = []
         self.skipped: list[str] = []
+        self.named = frozenset(settings.extra_tools)
+        """Tools the operator asked for by name, whatever the toolset selection says."""
+        self.exempted: list[str] = []
+        """Named tools that read-only would otherwise have dropped."""
+        self.found: set[str] = set()
+        """Which named tools actually exist, so a typo can be reported rather than ignored."""
+        self.toolset_selected = True
+        """False while a module is imported only to reach one named tool inside it.
+        Its other tools must not be registered as a side effect of that import."""
 
     def _add(
         self,
@@ -65,11 +74,24 @@ class Registrar:
         meta: dict[str, Any] | None,
         mutates: bool,
     ) -> F:
-        if mutates and self.settings.read_only:
-            self.skipped.append(fn.__name__)
+        name = fn.__name__
+        named = name in self.named
+        if named:
+            self.found.add(name)
+        elif not self.toolset_selected:
             return fn
+        registered: F = fn
+        if mutates and self.settings.read_only:
+            if not named:
+                self.skipped.append(name)
+                return fn
+            # Named by hand, so read-only yields for this one tool. The decision has
+            # to be carried into the call: `guard_write` runs inside the body and
+            # cannot see that this tool was singled out.
+            registered = safety.exempt_write(fn)  # type: ignore[assignment]
+            self.exempted.append(name)
         self.mcp.add_tool(
-            fn,
+            registered,
             title=title,
             # Normalise the docstring ourselves rather than letting the interpreter
             # decide: CPython 3.13 strips common leading whitespace from `__doc__` at
@@ -79,7 +101,7 @@ class Registrar:
             annotations=annotations,
             meta=meta or None,
         )
-        self.registered.append(fn.__name__)
+        self.registered.append(name)
         return fn
 
     def read_tool(
@@ -150,22 +172,46 @@ def build_server(settings: Settings, *, bridge: Bridge | None = None) -> MCPServ
     )
     registrar = Registrar(mcp, settings)
 
+    # A named tool may live in a toolset that was not selected, and nothing outside a
+    # toolset module knows which tools it defines. So once `--tools` is in play every
+    # toolset is imported and the Registrar drops whatever was not asked for.
     for name in ALL_TOOLSETS:
-        if name not in settings.toolsets:
+        selected = name in settings.toolsets
+        if not selected and not registrar.named:
             continue
         module = importlib.import_module(f".tools.{name}", package=__package__)
         register = getattr(module, "register", None)
         if register is None:
             log.warning("toolset %s has no register()", name)
             continue
+        registrar.toolset_selected = selected
         register(registrar)
+    registrar.toolset_selected = True
+
+    unknown = sorted(registrar.named - registrar.found)
+    if unknown:
+        # Loud, because the failure is otherwise invisible: the server starts, the
+        # tool the operator asked for is simply absent, and the model reports that
+        # Thunderbird cannot do the thing.
+        raise SystemExit(
+            f"unknown tool(s) in --tools: {', '.join(unknown)}. "
+            "Run `tbmcp tools --toolsets all` for the available names."
+        )
 
     log.info(
-        "registered %d tools from %s%s",
+        "registered %d tools from %s%s%s",
         len(registrar.registered),
         ",".join(settings.toolsets),
+        f" (+{','.join(sorted(registrar.named))} by name)" if registrar.named else "",
         f" ({len(registrar.skipped)} write tools omitted: read-only)" if registrar.skipped else "",
     )
+    if registrar.exempted:
+        # Worth a WARNING and not an INFO: --read-only no longer means what it says,
+        # and the operator should be able to find out why from the log alone.
+        log.warning(
+            "read-only lifted for %s (named explicitly with --tools)",
+            ", ".join(sorted(registrar.exempted)),
+        )
     return mcp
 
 

@@ -17,7 +17,7 @@ import os
 import sys
 from collections.abc import Sequence
 
-from .config import ALL_TOOLSETS, Settings, parse_toolsets
+from .config import ALL_TOOLSETS, Settings, parse_tools, parse_toolsets
 
 
 def _configure_logging(verbose: bool) -> None:
@@ -33,8 +33,10 @@ def _configure_logging(verbose: bool) -> None:
 def _settings_from_args(args: argparse.Namespace) -> Settings:
     settings = Settings.from_env()
     toolsets = parse_toolsets(args.toolsets) if getattr(args, "toolsets", None) else None
+    named = getattr(args, "tools", None)
     return settings.merged_with(
         toolsets=toolsets,
+        extra_tools=parse_tools(named) if named else None,
         read_only=True if getattr(args, "read_only", False) else None,
         yolo=True if getattr(args, "yolo", False) else None,
         unsafe_prefs=True if getattr(args, "unsafe_prefs", False) else None,
@@ -355,7 +357,8 @@ def cmd_tools(args: argparse.Namespace) -> int:
     for row in rows:
         marker = "r" if row["readOnly"] else ("!" if row["destructive"] else "w")
         print(f"  [{marker}] {row['name']:<34} {row['title'] or ''}")
-    print(f"\n{len(rows)} tools from toolsets: {','.join(settings.toolsets)}")
+    named = f" (+{','.join(settings.extra_tools)} by name)" if settings.extra_tools else ""
+    print(f"\n{len(rows)} tools from toolsets: {','.join(settings.toolsets)}{named}")
     return 0
 
 
@@ -363,7 +366,7 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
     from .bootstrap import main as bootstrap_main
 
     forwarded: list[str] = []
-    for flag in ("python", "venv", "clients", "toolsets", "source"):
+    for flag in ("python", "venv", "clients", "toolsets", "tools", "source"):
         value = getattr(args, flag, None)
         if value:
             forwarded += [f"--{flag}", str(value)]
@@ -391,6 +394,11 @@ def build_parser() -> argparse.ArgumentParser:
             help=f"comma separated: {','.join(ALL_TOOLSETS)}, all, or +extra (default: lean set)",
         )
         sub.add_argument("--read-only", action="store_true", help="register no mutating tools")
+        sub.add_argument(
+            "--tools",
+            help="comma separated tool names to register on top of --toolsets; a tool "
+            "named here is allowed to write even under --read-only",
+        )
         sub.add_argument(
             "--yolo", action="store_true", help="skip every confirmation gate (dangerous)"
         )

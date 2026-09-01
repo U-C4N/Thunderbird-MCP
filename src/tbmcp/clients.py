@@ -157,6 +157,8 @@ def _serve_args(settings: Settings) -> list[str]:
     toolsets = tuple(settings.toolsets)
     if toolsets != DEFAULT_TOOLSETS:
         args += ["--toolsets", "all" if toolsets == ALL_TOOLSETS else ",".join(toolsets)]
+    if settings.extra_tools:
+        args += ["--tools", ",".join(settings.extra_tools)]
     if settings.read_only:
         args.append("--read-only")
     if settings.send_mode == "send":

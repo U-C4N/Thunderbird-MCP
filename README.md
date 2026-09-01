@@ -209,6 +209,22 @@ tbmcp serve --toolsets +calendar        # the default set plus one
 tbmcp tools --toolsets all              # list what would be registered
 ```
 
+### One tool at a time
+
+A toolset is all or nothing, which is coarse when a single tool inside a group is
+the one you want. `--tools` names individuals, from any toolset, and a tool named
+there is allowed to write even under `--read-only`:
+
+```bash
+# read everything, write a draft, send nothing
+tbmcp serve --read-only --toolsets mail,folders,search \
+  --tools mail_draft_save,mail_compose_open,mail_send_status
+```
+
+`mail_send`, `mail_reply` and `mail_forward` stay unregistered, so no confirmation
+gate has to hold the line: a model cannot call a tool it was never told about. An
+unknown name is a startup error rather than a tool that is quietly missing.
+
 <!-- BEGIN GENERATED TOOL CATALOGUE -->
 112 tools across 10 toolsets; 48 of them read-only.
 Full signatures in [docs/TOOL-REFERENCE.md](docs/TOOL-REFERENCE.md).
@@ -435,7 +451,8 @@ Beyond the gate:
 - **Private keys never move.** OpenPGP keys can be listed and public keys exported;
   asking for secret key material is refused by design.
 - **`--read-only`** registers no mutating tools at all, which makes a safe second
-  registration easy.
+  registration easy. `--tools <name>` is its one exception, and it is granted per
+  tool: enough to allow `mail_draft_save` without allowing `mail_send`.
 - **`--yolo`** removes every gate. It exists for scripted use. Do not leave it on.
 
 ---

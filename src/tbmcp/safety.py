@@ -18,7 +18,9 @@ anything else gets a `BlockedError` that tells the model exactly what to pass.
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Callable
+from contextvars import ContextVar
 from typing import Annotated, Any
 
 from mcp.server.mcpserver import Context, Elicit, Resolve
@@ -117,13 +119,42 @@ def Gate(action: str) -> Any:
     return Annotated[Consent, Resolve(consent_for(action))]
 
 
+#: Set for the duration of a tool the operator named in `--tools`. Read-only is a
+#: blanket policy and naming one tool by hand is the deliberate exception to it, but
+#: the exception has to reach `guard_write`, which runs deep inside a tool body and
+#: has no idea which tool it is guarding.
+#:
+#: A ContextVar rather than a field on `_settings`: tool calls share one process and
+#: interleave at every await, so toggling global state around one call would leak its
+#: exemption into whatever else happened to be in flight.
+_exempt_from_read_only: ContextVar[bool] = ContextVar("tbmcp_write_exempt", default=False)
+
+
+def exempt_write(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Wrap a tool named in `--tools` so `guard_write` lets its writes through."""
+
+    @functools.wraps(fn)
+    async def permitted(*args: Any, **kwargs: Any) -> Any:
+        token = _exempt_from_read_only.set(True)
+        try:
+            return await fn(*args, **kwargs)
+        finally:
+            _exempt_from_read_only.reset(token)
+
+    return permitted
+
+
 def guard_write(what: str) -> None:
-    """Refuse a mutating operation when the server was started read-only."""
-    if _settings.read_only:
+    """Refuse a mutating operation when the server was started read-only.
+
+    The exception is a tool the operator named in `--tools`, which is how you allow
+    one write — saving a draft, say — without lifting read-only for everything else.
+    """
+    if _settings.read_only and not _exempt_from_read_only.get():
         raise BlockedError(
             f"This server is running read-only, so it will not {what}.",
             code="READ_ONLY",
-            needs="restart without --read-only",
+            needs="restart without --read-only, or --tools <name> to allow just this one",
         )
 
 
