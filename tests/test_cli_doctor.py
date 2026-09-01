@@ -11,6 +11,7 @@ chain (new breakage #4).
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -115,6 +116,42 @@ def _stub_common(monkeypatch, *, bridge_status: dict) -> tuple[list, list]:
     monkeypatch.setattr(DaemonInfo, "load", classmethod(lambda cls: None))
 
     return created_bridges
+
+
+def test_doctor_ok_false_when_the_configuration_was_refused():
+    """A healthy bridge must not vouch for a server that was never built."""
+    report = {"bridge": {"connected": True}, "configError": "unknown toolset 'bogus'"}
+    assert _doctor_ok(report) is False
+
+
+@pytest.mark.usefixtures("_clean_tbmcp_env")
+def test_a_refused_flag_still_produces_a_json_report(capsys):
+    """The flag parsers reject with `SystemExit`, which is a `BaseException` and so
+    slips past every `except Exception` here. `doctor --json` therefore printed
+    nothing at all on a typo — and a caller reading stdout cannot tell "you gave me a
+    bad flag" from "doctor crashed", which is the one distinction the machine-readable
+    output exists to make.
+
+    No stubs: this must return before it reaches a bridge or a profile.
+    """
+    args = build_parser().parse_args(["doctor", "--json", "--toolsets", "bogus"])
+    exit_code = cmd_doctor(args)
+
+    assert exit_code == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert "bogus" in payload["configError"]
+
+
+@pytest.mark.usefixtures("_clean_tbmcp_env")
+def test_a_refused_flag_says_so_in_the_human_readable_output_too(capsys):
+    args = build_parser().parse_args(["doctor", "--toolsets", "bogus"])
+    exit_code = cmd_doctor(args)
+
+    assert exit_code == 1
+    out = capsys.readouterr().out
+    assert "configuration rejected" in out
+    assert "bogus" in out
 
 
 @pytest.mark.usefixtures("_clean_tbmcp_env")

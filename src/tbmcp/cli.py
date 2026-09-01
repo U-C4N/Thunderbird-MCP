@@ -103,6 +103,32 @@ def cmd_install_addon(args: argparse.Namespace) -> int:
     return 0
 
 
+def _doctor_config_error(args: argparse.Namespace, message: str) -> int:
+    """Report a rejected configuration as a finding rather than as a dead command.
+
+    `doctor` exists to say what is wrong with a setup, and bad flags are a thing that
+    is wrong with a setup — so they belong *in* the report, not in place of it.
+
+    The flag parsers signal rejection with `SystemExit`, which is a `BaseException`
+    and so slips past every `except Exception` in this module. Without this,
+    `doctor --json` printed nothing at all on a typo, leaving a caller unable to tell
+    a misconfiguration from a crash — the one distinction the machine-readable output
+    exists to make.
+    """
+    report = {
+        "python": sys.version.split()[0],
+        "executable": sys.executable,
+        "configError": message,
+        "ok": False,
+    }
+    if getattr(args, "json", False):
+        print(json.dumps(report, indent=2, default=str))
+    else:
+        print("thunderbird-mcp doctor\n")
+        print(f"  configuration rejected: {message}")
+    return 1
+
+
 def _doctor_ok(report: dict) -> bool:
     """Whether `doctor` actually established a working chain — not just ran.
 
@@ -115,6 +141,11 @@ def _doctor_ok(report: dict) -> bool:
     `connected` or `error`. That is a supported configuration, not a broken chain,
     so it must not sink `ok` the way a genuine dispatch failure would.
     """
+    if report.get("configError"):
+        # Nothing downstream is meaningful when the configuration itself was refused,
+        # and a healthy bridge must not be allowed to vouch for a server that was
+        # never built.
+        return False
     bridge_state = report.get("bridge")
     tool_call = report.get("tbStatusCall")
     bridge_ok = isinstance(bridge_state, dict) and bool(bridge_state.get("connected"))
@@ -131,7 +162,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     from .profile import ProfileSnapshot, find_profile, list_profiles
     from .server import build_server
 
-    settings = _settings_from_args(args)
+    try:
+        settings = _settings_from_args(args)
+    except SystemExit as exc:
+        return _doctor_config_error(args, str(exc))
     report: dict[str, object] = {"python": sys.version.split()[0], "executable": sys.executable}
 
     profiles = list_profiles()
@@ -196,6 +230,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             else:
                 result = await mcp.call_tool("tb_status", {})
                 report["tbStatusCall"] = result.structured_content
+        except SystemExit as exc:
+            # Same reasoning as `_doctor_config_error`, at the other place a
+            # configuration can be refused: `build_server` validates as it registers,
+            # and a `SystemExit` escaping here would abandon the report mid-write.
+            report["configError"] = str(exc)
+            report["tbStatusCall"] = {"error": f"configuration rejected: {exc}"}
         except Exception as exc:
             report["tbStatusCall"] = {"error": f"{type(exc).__name__}: {exc}"}
         finally:
@@ -227,6 +267,8 @@ def _print_doctor(report: dict) -> None:
         print(f"  {label:<26} {value}")
 
     print("thunderbird-mcp doctor\n")
+    if report.get("configError"):
+        print(f"  configuration rejected: {report['configError']}\n")
     print("Python")
     line("version", report["python"])
     line("interpreter", report["executable"])
