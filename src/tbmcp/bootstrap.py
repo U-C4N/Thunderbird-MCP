@@ -658,6 +658,11 @@ def _step_verify(options: Options, state: dict, run: Runner) -> tuple[str, str]:
         argv += ["--toolsets", options.toolsets]
     status, output = run(argv)
     payload = _json_field_report(output)
+    if payload and payload.get("configError"):
+        # `doctor` says what is wrong in a sentence; falling through would print the
+        # whole JSON report instead and bury it. This step's detail line is the one
+        # thing a user reads when bootstrap stops, so it has to stay a sentence.
+        return "failed", f"doctor: {payload['configError']}"
     if status != 0 or payload is None or not payload.get("ok"):
         return "failed", output.strip() or "doctor reported a problem"
     tool_call = payload.get("tbStatusCall")

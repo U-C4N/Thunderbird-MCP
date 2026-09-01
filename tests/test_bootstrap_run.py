@@ -540,6 +540,29 @@ def test_verify_step_fails_when_doctor_exits_zero_but_reports_not_ok(tmp_path):
     assert status != "ok"
 
 
+def test_verify_step_reports_a_config_error_as_a_sentence_not_a_json_dump(tmp_path):
+    """`doctor` now answers a refused flag with a report rather than dying, which is
+    what makes the failure machine-readable — but it also means the plain-language
+    message no longer reaches stderr. Falling through to `output.strip()` would show
+    the user the entire JSON blob in place of the one line that tells them what they
+    typed wrong.
+
+    This step's detail is what bootstrap prints when it stops, so it reads the field
+    it was given.
+    """
+    message = "unknown toolset 'bogus'; choose from: mail, folders, compose"
+
+    def run(argv):
+        return 1, json.dumps({"ok": False, "configError": message}, indent=2)
+
+    venv_python = str(tmp_path / "venv" / "Scripts" / "python.exe")
+    status, detail = _step_verify(Options(dry_run=False), {"venv_python": venv_python}, run)
+
+    assert status == "failed"
+    assert detail == f"doctor: {message}"
+    assert "{" not in detail, f"the JSON report leaked into the message: {detail}"
+
+
 def test_verify_step_fails_when_doctor_output_is_not_json(tmp_path):
     def run(argv):
         return 0, "not json at all"
