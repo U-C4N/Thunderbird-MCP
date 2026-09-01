@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import shlex
 import sys
 
 import pytest
@@ -12,6 +13,7 @@ import pytest
 from tbmcp.bootstrap import (
     Options,
     _detected_clients,
+    _rerun_without_dry_run,
     _step_addon,
     _step_clients,
     _step_imports,
@@ -635,6 +637,30 @@ def test_no_remedy_ever_names_a_bare_tbmcp_or_pip(step_name):
 
 
 # ------------------------------------------------------------------- I5: no unhandled crash
+
+
+@pytest.mark.parametrize(
+    ("field", "flag"),
+    [("tools", "--tools"), ("toolsets", "--toolsets")],
+)
+def test_the_rerun_command_survives_a_value_with_whitespace(field, flag):
+    """A dry run's whole product is the command it tells you to run next, and both of
+    these flags accept whitespace their parsers then strip — `--tools "a, b"` is valid
+    input. Rendered bare it becomes two arguments, so the command a dry run hands back
+    fails in a way that looks like the tool is broken rather than the quoting.
+
+    `shlex.split` is the check rather than a substring match: the question is not what
+    the string looks like, it is what a shell does with it.
+    """
+    value = "mail_draft_save, mail_compose_open" if field == "tools" else "mail, folders"
+    command = _rerun_without_dry_run(Options(**{field: value}))
+
+    argv = shlex.split(command)
+    assert flag in argv, argv
+    assert argv[argv.index(flag) + 1] == value, (
+        f"{flag} lost its value to shell word-splitting: {argv}"
+    )
+    assert argv[-1] == value, f"a stray positional trailed the command: {argv}"
 
 
 def test_a_steps_own_bug_still_produces_valid_json_not_a_traceback():

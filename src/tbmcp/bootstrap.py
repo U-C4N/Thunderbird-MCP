@@ -751,10 +751,14 @@ def _rerun_without_dry_run(options: Options) -> str:
         parts.append(f'--venv "{options.venv}"')
     if options.clients:
         parts.append(f"--clients {','.join(options.clients)}")
+    # Quoted like the paths above, because both of these accept whitespace that the
+    # parsers then strip: `--tools "a, b"` is valid input, and rendering it bare puts
+    # `b` back on the command line as a stray positional. The rerun line is the one
+    # thing a dry run exists to produce, so it has to survive being pasted.
     if options.toolsets:
-        parts.append(f"--toolsets {options.toolsets}")
+        parts.append(f'--toolsets "{options.toolsets}"')
     if options.tools:
-        parts.append(f"--tools {options.tools}")
+        parts.append(f'--tools "{options.tools}"')
     if options.source:
         parts.append(f'--source "{options.source}"')
     if options.skip_addon:
