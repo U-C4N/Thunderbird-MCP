@@ -17,15 +17,18 @@
     );
   }
 
-  // Leave a record on disk before doing anything that could fail. When the bridge
-  // itself is broken there is no channel left to report through, so `tbmcp doctor`
-  // reads this file instead — and its absence on an installed, active add-on is
-  // itself the diagnosis: the privileged half never loaded.
   // What the transport announces in its `hello`. Fetched here because the status
   // file needs the same two values, and because the handshake must never wait on a
   // probe: whatever we learn now is what the first hello carries.
   let identity = { app: null, capabilities: null };
+  // The startup report, kept so the transport's state can be added to it later
+  // without probing anything again.
+  let report = null;
 
+  // Leave a record on disk before doing anything that could fail. When the bridge
+  // itself is broken there is no channel left to report through, so `tbmcp doctor`
+  // reads this file instead — and its absence on an installed, active add-on is
+  // itself the diagnosis: the privileged half never loaded.
   if (browser.tbx) {
     // First, and most important: stop Thunderbird suspending this page. It ships
     // extensions.eventPages.enabled=true, which makes MV2's "persistent": true a
@@ -67,20 +70,36 @@
         capabilities: await tbxCapabilities.describe(),
         app: await tbxCapabilities.appInfo(),
       };
-      await browser.tbx.writeStatus({
+      report = {
         writtenAt: new Date().toISOString(),
         addonVersion: manifest.version,
         app: identity.app,
         capabilities: identity.capabilities,
         methodCount: tbxRegistry.methods().length,
-      });
+      };
+      await browser.tbx.writeStatus(report);
     } catch (ex) {
       tbxLog.warn("could not write the status file:", ex.message || ex);
     }
   }
 
   tbxEvents.start();
-  tbxTransport.start(identity);
+  tbxTransport.start(identity, {
+    /* A connection that never works leaves nothing else to look at: the daemon
+     * cannot report what it never heard from, and the console is gone by the time
+     * anyone runs `tbmcp doctor`. So the same file the startup report goes into
+     * gains the transport's own account of what has been happening. */
+    onStateChange(transport) {
+      if (!report) {
+        return;
+      }
+      browser.tbx
+        .writeStatus({ ...report, transport, writtenAt: new Date().toISOString() })
+        .catch((ex) => {
+          tbxLog.warn("could not update the status file:", ex.message || ex);
+        });
+    },
+  });
 
   browser.runtime.onSuspend.addListener(() => {
     tbxLog.info("suspending — closing the bridge");

@@ -36,6 +36,12 @@ var tbxTransport = (() => {
    * concerned — no error event, no close — so nothing else would ever free it. */
   const CONNECT_TIMEOUT_MS = 15000;
 
+  /** Connections in a row that reached the daemon and got no `welcome`. */
+  const HANDSHAKE_ALARM_AFTER = 3;
+
+  /** Floor on how often the state is pushed out to whoever asked to hear about it. */
+  const NOTIFY_THROTTLE_MS = 10000;
+
   let socket = null;
   let attempt = 0;
   let waits = 0;
@@ -54,6 +60,12 @@ var tbxTransport = (() => {
   let welcomed = false; // has the live socket completed its handshake?
   let connecting = false; // a connect() is between reading the pairing and its socket
   let lastPairing = null; // {port, token} of the daemon the schedules apply to
+  let consecutiveFailures = 0; // closes since the last `welcome`
+  let lastCloseCode = null;
+  let lastCloseAt = null;
+  let lastWelcomeAt = null;
+  let onStateChange = null;
+  let lastNotifyAt = 0;
   const inFlight = new Map(); // request id -> AbortController-ish flag
 
   function state() {
@@ -66,6 +78,48 @@ var tbxTransport = (() => {
     // Open but unanswered is its own state, and the one worth reporting: it is
     // what a wedged handshake looks like from in here.
     return welcomed ? "connected" : "handshaking";
+  }
+
+  /**
+   * Everything `tbmcp doctor` needs when the bridge itself is what is broken.
+   *
+   * It ends up in <profile>/tbmcp-addon-status.json, which is the only channel
+   * left when no connection is working.
+   */
+  function status() {
+    return {
+      state: state(),
+      attempt,
+      inFlight: inFlight.size,
+      consecutiveFailures,
+      lastCloseCode,
+      lastCloseAt,
+      lastWelcomeAt,
+      port: currentPort,
+    };
+  }
+
+  /**
+   * @param {boolean} force  a transition worth reporting whatever the last one
+   *   cost — coming up is always news, a failure in a burst of them is not.
+   */
+  function notify(force) {
+    if (!onStateChange || stopped) {
+      return;
+    }
+    const at = Date.now();
+    if (!force) {
+      if (at - lastNotifyAt < NOTIFY_THROTTLE_MS) {
+        return;
+      }
+      lastNotifyAt = at;
+    }
+    try {
+      onStateChange(status());
+    } catch (ex) {
+      // Reporting our own state must not be able to break the connection.
+      tbxLog.debug("state listener failed:", ex.message || ex);
+    }
   }
 
   async function readPairing() {
@@ -182,6 +236,9 @@ var tbxTransport = (() => {
         attempt = 0;
         waits = 0;
         rejections = 0;
+        consecutiveFailures = 0;
+        lastWelcomeAt = new Date().toISOString();
+        notify(true);
         refreshIdentity();
         break;
       default:
@@ -279,7 +336,6 @@ var tbxTransport = (() => {
       socket = new WebSocket(url);
     } catch (ex) {
       socket = null;
-      currentPort = null;
       scheduleRetry(`WebSocket constructor failed: ${ex.message || ex}`, "failed");
       return;
     }
@@ -337,12 +393,30 @@ var tbxTransport = (() => {
       const hadWelcome = welcomed;
       welcomed = false;
       socket = null;
-      currentPort = null;
+      // currentPort survives the close on purpose: a status read after a failure
+      // is exactly when the port we were failing against matters.
       for (const ctx of inFlight.values()) {
         ctx.cancelled = true;
       }
       inFlight.clear();
       const code = event ? event.code : 1006;
+      const reason = (event && event.reason) || "";
+      lastCloseCode = code;
+      lastCloseAt = new Date().toISOString();
+      // Reported at info, not debug: a connection that keeps dropping is the one
+      // thing a user needs to be able to see without turning on verbose logging.
+      tbxLog.info(`socket closed (code ${code}: ${reason})`);
+
+      consecutiveFailures += 1;
+      if (consecutiveFailures === HANDSHAKE_ALARM_AFTER) {
+        // Once per run of failures. Saying it every time would bury it.
+        tbxLog.error(
+          `the daemon on port ${pairing.port} accepted ${consecutiveFailures} connections ` +
+            "but none completed the handshake — restart Thunderbird if this persists; " +
+            "`tbmcp doctor` shows the daemon's view"
+        );
+      }
+      notify(false);
 
       // A rejected token (4001) nearly always means the daemon we paired with has been
       // replaced and the file we read is stale — not that the install is broken. So
@@ -428,13 +502,16 @@ var tbxTransport = (() => {
     /**
      * @param {{app: object|null, capabilities: object|null}} [seed]  what main.js
      *   already fetched for the status file; either half may be null.
+     * @param {{onStateChange: (status: object) => void}} [options]  told when the
+     *   bridge comes up and when a connection fails.
      */
-    start(seed) {
+    start(seed, options) {
       stopped = false;
       identity = {
         app: (seed && seed.app) || null,
         capabilities: (seed && seed.capabilities) || null,
       };
+      onStateChange = (options && options.onStateChange) || null;
       connect();
       clearInterval(supervisor);
       supervisor = setInterval(supervise, SUPERVISE_MS);
@@ -455,8 +532,6 @@ var tbxTransport = (() => {
     emit(name, data) {
       send({ t: "event", name, data });
     },
-    status() {
-      return { state: state(), attempt, inFlight: inFlight.size };
-    },
+    status,
   };
 })();

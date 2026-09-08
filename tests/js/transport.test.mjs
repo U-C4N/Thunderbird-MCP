@@ -336,6 +336,119 @@ describe("retry schedule", () => {
   });
 });
 
+describe("visible state", () => {
+  const BACKOFF = [500, 1000, 2000, 4000];
+
+  /** Close the live socket and wait out the retry, once per call. */
+  async function failCycle(world, index) {
+    world.WebSocket.instances.at(-1).serverClose(1006, "closed by the daemon");
+    await world.clock.advance(BACKOFF[index]);
+  }
+
+  const complaints = (world) => world.errors().filter((text) => text.includes("restart Thunderbird"));
+
+  it("names every close and complains once when none of them handshake", async () => {
+    const world = makeWorld();
+    await world.start();
+
+    for (let index = 0; index < 3; index += 1) {
+      await failCycle(world, index);
+    }
+
+    assert.deepEqual(
+      world.log.records.filter((record) => record.level === "info").map((r) => r.text),
+      new Array(3).fill("socket closed (code 1006: closed by the daemon)")
+    );
+    assert.deepEqual(complaints(world), [
+      "the daemon on port 4711 accepted 3 connections but none completed the handshake — " +
+        "restart Thunderbird if this persists; `tbmcp doctor` shows the daemon's view",
+    ]);
+
+    await failCycle(world, 3);
+    assert.equal(complaints(world).length, 1, "complained more than once");
+  });
+
+  it("complains again only after a welcome has reset the count", async () => {
+    const world = makeWorld();
+    await world.start();
+    for (let index = 0; index < 3; index += 1) {
+      await failCycle(world, index);
+    }
+    assert.equal(complaints(world).length, 1);
+
+    const recovered = world.WebSocket.instances.at(-1);
+    recovered.open();
+    recovered.receive({ t: "welcome" });
+
+    recovered.serverClose(1006, "daemon exited");
+    await world.clock.advance(500);
+    for (let index = 0; index < 3; index += 1) {
+      await failCycle(world, index);
+    }
+
+    assert.equal(complaints(world).length, 2);
+  });
+});
+
+describe("status", () => {
+  it("reports the whole picture before anything has happened", () => {
+    const world = makeWorld();
+
+    assert.deepEqual(plain(world.transport.status()), {
+      state: "disconnected",
+      attempt: 0,
+      inFlight: 0,
+      consecutiveFailures: 0,
+      lastCloseCode: null,
+      lastCloseAt: null,
+      lastWelcomeAt: null,
+      port: null,
+    });
+  });
+
+  it("announces the bridge coming up and the connection failing", async () => {
+    const world = makeWorld();
+    const seen = [];
+    const ws = await world.start(
+      { app: null, capabilities: null },
+      { onStateChange: (report) => seen.push(plain(report)) }
+    );
+
+    ws.open();
+    ws.receive({ t: "welcome" });
+
+    assert.equal(seen.length, 1);
+    assert.equal(seen.at(-1).state, "connected");
+    assert.equal(seen.at(-1).port, 4711);
+    assert.match(seen.at(-1).lastWelcomeAt, /^\d{4}-\d\d-\d\dT/);
+
+    ws.serverClose(1006, "daemon exited");
+
+    assert.equal(seen.length, 2);
+    assert.equal(seen.at(-1).state, "disconnected");
+    assert.equal(seen.at(-1).lastCloseCode, 1006);
+    assert.equal(seen.at(-1).consecutiveFailures, 1);
+    assert.match(seen.at(-1).lastCloseAt, /^\d{4}-\d\d-\d\dT/);
+  });
+
+  it("does not report every failure in a burst", async () => {
+    const world = makeWorld();
+    const seen = [];
+    await world.start(
+      { app: null, capabilities: null },
+      { onStateChange: (report) => seen.push(plain(report)) }
+    );
+
+    world.WebSocket.instances.at(-1).serverClose(1006, "closed by the daemon");
+    await world.clock.advance(500);
+    world.WebSocket.instances.at(-1).serverClose(1006, "closed by the daemon");
+    await world.clock.advance(1000);
+
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].consecutiveFailures, 1);
+  });
+});
+
 describe("startup wiring", () => {
   /** Run main.js as Thunderbird would, against a transport that only records. */
   async function bootMain() {
@@ -357,6 +470,22 @@ describe("startup wiring", () => {
     await settle();
     return { browser, starts };
   }
+
+  it("keeps the status file up to date as the transport changes state", async () => {
+    const { browser, starts } = await bootMain();
+    const before = plain(browser._written[0]);
+
+    starts[0].options.onStateChange({ state: "connected", port: 4711 });
+    await settle();
+
+    assert.equal(browser._written.length, 2);
+    const after = plain(browser._written[1]);
+    assert.deepEqual(after.transport, { state: "connected", port: 4711 });
+    for (const key of ["addonVersion", "app", "capabilities", "methodCount"]) {
+      assert.deepEqual(after[key], before[key], `${key} was lost`);
+    }
+    assert.ok(after.writtenAt >= before.writtenAt, "writtenAt went backwards");
+  });
 
   it("hands the transport the identity it fetched for the status file", async () => {
     const { browser, starts } = await bootMain();
