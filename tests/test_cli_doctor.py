@@ -453,9 +453,25 @@ def test_the_daemon_line_reflects_the_daemon_the_probe_started(monkeypatch, tmp_
         profile=_profile(tmp_path, {**_ADDON_STATUS, "addonVersion": "1.3.0"}),
     )
     _stub_server(monkeypatch, connected=True)
-    # Nothing advertised before the probe; a daemon advertised once it has run.
-    loads = iter([None, SimpleNamespace(pid=4242, port=5151)])
-    monkeypatch.setattr(DaemonInfo, "load", classmethod(lambda cls: next(loads, None)))
+    # Nothing is advertised until the probe has run; the advertisement must be read
+    # after it, never before. `probed` flips when the (fake) bridge is asked to
+    # connect, so a read that happens too early sees None.
+    probed = {"done": False}
+
+    def load(cls):
+        return SimpleNamespace(pid=4242, port=5151) if probed["done"] else None
+
+    monkeypatch.setattr(DaemonInfo, "load", classmethod(load))
+    import tbmcp.bridge as bridge_module
+
+    fake_bridge_cls = bridge_module.Bridge
+    original_require = fake_bridge_cls.require_thunderbird
+
+    async def require_and_mark(self, *, wait=0.0):
+        probed["done"] = True
+        return await original_require(self, wait=wait)
+
+    monkeypatch.setattr(fake_bridge_cls, "require_thunderbird", require_and_mark)
 
     exit_code = cmd_doctor(build_parser().parse_args(["doctor", "--json", "--wait", "0"]))
 

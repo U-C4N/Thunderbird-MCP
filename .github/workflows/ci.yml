@@ -59,8 +59,9 @@ jobs:
         # directory must not disable this layer behind a green tick.
         shell: bash
         run: |
-          count=$(ls tests/js/*.test.mjs 2>/dev/null | wc -l)
-          test "$count" -gt 0 || { echo "no add-on test files found"; exit 1; }
+          # `|| true` keeps errexit from ending the step before the message below.
+          count=$(ls tests/js/*.test.mjs 2>/dev/null | wc -l || true)
+          test "$count" -gt 0 || { echo "no add-on test files found under tests/js"; exit 1; }
           node --test "tests/js/*.test.mjs"
 
       - name: Cross-layer consistency

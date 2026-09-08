@@ -217,13 +217,6 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             report["addonStatus"] = None
 
     report["addon"] = addon_install.summary()
-    info = DaemonInfo.load()
-    report["daemon"] = (
-        {"running": True, "pid": info.pid, "port": info.port} if info else {"running": False}
-    )
-    # The daemon is spawned detached onto DEVNULL, so this file is the only place
-    # its side of a failure survives.
-    report["daemon"]["logFile"] = str(daemon_log_path())
 
     async def probe() -> None:
         bridge = Bridge(profile_hint=settings.profile, autostart=not args.no_start)
@@ -265,13 +258,15 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     asyncio.run(probe())
 
-    # The probe may have started the daemon it then connected to, so the
-    # advertisement read above can be stale: on a first run it printed "daemon:
-    # not running" directly above "connected: True". Read it again now.
+    # Read the advertisement only now: the probe may have started the daemon it
+    # then connected to, and reading before it printed "daemon: not running"
+    # directly above "connected: True" on every first run.
     info = DaemonInfo.load()
     report["daemon"] = (
         {"running": True, "pid": info.pid, "port": info.port} if info else {"running": False}
     )
+    # The daemon is spawned detached onto DEVNULL, so this file is the only place
+    # its side of a failure survives.
     report["daemon"]["logFile"] = str(daemon_log_path())
 
     # Both derived from what is already in the report, once the probe has filled in
