@@ -28,6 +28,53 @@
     return known;
   }
 
+  /** The tag experiment/core.js packs a failure's whole taxonomy into. */
+  const ERROR_TAG = "tbxerr:";
+
+  /**
+   * Re-raise what the privileged half threw, in the kind it chose.
+   *
+   * Only a message crosses that boundary — `normalizeError` drops everything
+   * else about an error raised with the system principal — so the experiment
+   * serialises kind, code and needs into the message and this unpacks them. An
+   * untagged message is Thunderbird's own failure, or an add-on half older than
+   * this one, and still gets the guesswork it always got.
+   */
+  function retag(ex) {
+    const message = String(ex.message || ex);
+    if (message.startsWith(ERROR_TAG)) {
+      let payload = null;
+      try {
+        payload = JSON.parse(message.slice(ERROR_TAG.length));
+      } catch (parseError) {
+        payload = null; // not ours after all; fall through to the heuristics
+      }
+      if (payload && payload.message) {
+        const extra = payload.code ? { code: payload.code } : undefined;
+        switch (payload.kind) {
+          case "usage":
+            return tbxError.usage(payload.message, extra);
+          case "unsupported":
+            return tbxError.unsupported(payload.message, extra);
+          case "blocked":
+            return tbxError.blocked(payload.message, payload.needs, extra);
+          default:
+            return tbxError.thunderbird(payload.message, extra);
+        }
+      }
+    }
+    if (/ is required|must be|unknown privileged method|not an? /.test(message)) {
+      return tbxError.usage(message);
+    }
+    if (/does not expose|unavailable/.test(message)) {
+      return tbxError.unsupported(message);
+    }
+    if (/not writable|will not be written|locked by/.test(message)) {
+      return tbxError.blocked(message);
+    }
+    return tbxError.thunderbird(message);
+  }
+
   /**
    * A single catch-all handler. `tbxRegistry.invoke` only reaches us for methods
    * that were registered, so we register the prefix itself and let the transport's
@@ -56,19 +103,7 @@
     try {
       return await browser.tbx.invoke(bare, params);
     } catch (ex) {
-      // Errors thrown inside the experiment arrive as plain Error objects with the
-      // message intact; re-tag them so the taxonomy survives the hop.
-      const message = String(ex.message || ex);
-      if (/ is required|must be|unknown privileged method|not an? /.test(message)) {
-        throw tbxError.usage(message);
-      }
-      if (/does not expose|unavailable/.test(message)) {
-        throw tbxError.unsupported(message);
-      }
-      if (/not writable|will not be written|locked by/.test(message)) {
-        throw tbxError.blocked(message);
-      }
-      throw tbxError.thunderbird(message);
+      throw retag(ex);
     }
   };
 

@@ -27,8 +27,20 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", ".
  *   properties.
  */
 export function loadScript(relPath, globals = {}) {
+  return runInContext(vm.createContext({ ...globals }), relPath);
+}
+
+/**
+ * Evaluate `addon/<relPath>` in a context another script already ran in.
+ *
+ * Thunderbird loads every background script into one page scope, so a script
+ * that reads a `var` another one declared has to be tested that way — passing it
+ * in as a global would hide a load-order mistake.
+ *
+ * @returns {object} the same context, now carrying this script's top-level `var`s.
+ */
+export function runInContext(context, relPath) {
   const source = fs.readFileSync(path.join(ROOT, "addon", relPath), "utf8");
-  const context = vm.createContext({ ...globals });
   vm.runInContext(source, context, { filename: relPath });
   return context;
 }

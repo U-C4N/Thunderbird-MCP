@@ -30,7 +30,9 @@ var tbxError = {
     const payload = {
       kind: ex.tbxKind || "thunderbird",
       message: String(ex.message || ex),
-      code: ex.code || ex.name || null,
+      // A bare "Error" is not a code — it reached the model as a second, empty
+      // failure tag alongside the real one.
+      code: ex.code || (ex.name && ex.name !== "Error" ? ex.name : null),
     };
     if (ex.needs) {
       payload.needs = Array.isArray(ex.needs) ? ex.needs : [ex.needs];
