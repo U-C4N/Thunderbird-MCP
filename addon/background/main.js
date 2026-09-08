@@ -21,6 +21,11 @@
   // itself is broken there is no channel left to report through, so `tbmcp doctor`
   // reads this file instead — and its absence on an installed, active add-on is
   // itself the diagnosis: the privileged half never loaded.
+  // What the transport announces in its `hello`. Fetched here because the status
+  // file needs the same two values, and because the handshake must never wait on a
+  // probe: whatever we learn now is what the first hello carries.
+  let identity = { app: null, capabilities: null };
+
   if (browser.tbx) {
     // First, and most important: stop Thunderbird suspending this page. It ships
     // extensions.eventPages.enabled=true, which makes MV2's "persistent": true a
@@ -58,12 +63,15 @@
     }
 
     try {
-      const capabilities = await tbxCapabilities.describe();
+      identity = {
+        capabilities: await tbxCapabilities.describe(),
+        app: await tbxCapabilities.appInfo(),
+      };
       await browser.tbx.writeStatus({
         writtenAt: new Date().toISOString(),
         addonVersion: manifest.version,
-        app: await tbxCapabilities.appInfo(),
-        capabilities,
+        app: identity.app,
+        capabilities: identity.capabilities,
         methodCount: tbxRegistry.methods().length,
       });
     } catch (ex) {
@@ -72,7 +80,7 @@
   }
 
   tbxEvents.start();
-  tbxTransport.start();
+  tbxTransport.start(identity);
 
   browser.runtime.onSuspend.addListener(() => {
     tbxLog.info("suspending — closing the bridge");

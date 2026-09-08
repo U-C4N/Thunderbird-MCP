@@ -33,6 +33,11 @@ var tbxTransport = (() => {
   let rejections = 0;
   let retryTimer = null;
   let stopped = false;
+  /* What `hello` announces about this Thunderbird. Kept here, ready to send,
+   * because the handshake must not wait on a probe: both probes cross into the
+   * privileged half, and one that never answers used to leave the socket open and
+   * silent until the daemon gave up on it. */
+  let identity = { app: null, capabilities: null };
   const inFlight = new Map(); // request id -> AbortController-ish flag
 
   function state() {
@@ -154,10 +159,28 @@ var tbxTransport = (() => {
         attempt = 0;
         waits = 0;
         rejections = 0;
+        refreshIdentity();
         break;
       default:
         break;
     }
+  }
+
+  /**
+   * Re-probe once the connection is up, so the next reconnect is not stale.
+   *
+   * Off the handshake path on purpose: this is where the slow calls live, and
+   * nothing waits for the answer. A probe that fails leaves the previous identity
+   * in place — a stale description is still better than none.
+   */
+  function refreshIdentity() {
+    Promise.all([tbxCapabilities.appInfo(), tbxCapabilities.describe()])
+      .then(([app, capabilities]) => {
+        identity = { app, capabilities };
+      })
+      .catch((ex) => {
+        tbxLog.debug("identity refresh failed:", ex.message || ex);
+      });
   }
 
   /** @param {"waiting"|"failed"} kind  which schedule to use. */
@@ -210,16 +233,15 @@ var tbxTransport = (() => {
       return;
     }
 
-    socket.onopen = async () => {
-      const hello = {
+    socket.onopen = () => {
+      send({
         t: "hello",
         token: pairing.token,
         protocol: PROTOCOL,
         addonVersion: browser.runtime.getManifest().version,
-        app: await tbxCapabilities.appInfo(),
-        capabilities: await tbxCapabilities.describe(),
-      };
-      send(hello);
+        app: identity.app || tbxCapabilities.appInfoSync(),
+        capabilities: identity.capabilities || tbxCapabilities.describeSync(),
+      });
     };
     socket.onmessage = onMessage;
     socket.onerror = () => {
@@ -313,8 +335,16 @@ var tbxTransport = (() => {
   }
 
   return {
-    start() {
+    /**
+     * @param {{app: object|null, capabilities: object|null}} [seed]  what main.js
+     *   already fetched for the status file; either half may be null.
+     */
+    start(seed) {
       stopped = false;
+      identity = {
+        app: (seed && seed.app) || null,
+        capabilities: (seed && seed.capabilities) || null,
+      };
       connect();
       clearInterval(supervisor);
       supervisor = setInterval(supervise, SUPERVISE_MS);

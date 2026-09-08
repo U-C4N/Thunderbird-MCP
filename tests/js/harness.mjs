@@ -208,6 +208,8 @@ export function fakeBrowser({ pairing = null, manifestVersion = "9.9.9" } = {}) 
       readBridgeFile: async () => (typeof pairing === "function" ? pairing() : pairing),
       appInfo: async () => ({ name: "Thunderbird", version: "155.0" }),
       availableModules: async () => ({ loaded: [], methods: [], resolvable: [] }),
+      keepAlive: async () => ({ enabled: true, intervalMs: 20000, idleTimeoutMs: 30000 }),
+      grantOptionalPermission: async () => ({ alreadyHad: true, granted: true }),
       writeStatus: async (report) => {
         browser._written.push(report);
       },
