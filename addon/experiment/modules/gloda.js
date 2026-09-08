@@ -290,6 +290,27 @@ TBX_MODULE_NAMES.push("gloda");
     return Services.prefs.getBoolPref("mailnews.database.global.indexer.enabled", false);
   }
 
+  /**
+   * Split search terms into the ones the index can match and the ones it cannot.
+   *
+   * The tokenizer keeps only tokens of three characters or more (one for CJK), so
+   * a term like "2.0" becomes "2" and "0" and is dropped entirely. Under AND that
+   * one term zeroes the whole query, silently — which is worth reporting, because
+   * the answer looks exactly like "nothing matched".
+   */
+  function classifyTerms(terms) {
+    const usable = [];
+    const unmatchable = [];
+    for (const term of terms || []) {
+      const tokens = String(term)
+        .split(/[^\p{L}\p{N}]+/u)
+        .filter(Boolean);
+      const matches = tokens.some((token) => token.length >= 3 || token.charCodeAt(0) >= 0x2000);
+      (matches ? usable : unmatchable).push(term);
+    }
+    return { usable, unmatchable };
+  }
+
   // ------------------------------------------------------------------- search
 
   TBX_MODULES["gloda.search"] = async (params) => {
@@ -303,13 +324,8 @@ TBX_MODULE_NAMES.push("gloda");
     const Searcher = needMod("GlodaMsgSearcher");
 
     const searcher = new Searcher(null, query, params.matchAll !== false);
-    // The tokenizer drops terms shorter than three characters (one or two for
-    // CJK), so a query made only of those silently matches everything or
-    // nothing. Say so instead.
-    const usable = (searcher.fulltextTerms || []).some(
-      (term) => term.length >= 3 || term.charCodeAt(0) >= 0x2000
-    );
-    if (!usable) {
+    const { usable, unmatchable } = classifyTerms(searcher.fulltextTerms);
+    if (!usable.length) {
       throw H.usage(
         `no searchable term in ${JSON.stringify(query)} — the global index needs ` +
           "terms of at least three characters (one for CJK)"
@@ -329,16 +345,22 @@ TBX_MODULE_NAMES.push("gloda");
         // ours nests inside it.
         searcher.listener = listener;
         searcher.query = searcher.buildFulltextQuery();
-        searcher.query.limit(retrieve);
+        // One row past what we need: the only way to know whether the corpus was
+        // deeper than the retrieval, without calling a corpus that exactly fills
+        // it truncated.
+        searcher.query.limit(retrieve + 1);
         searcher.collection = searcher.query.getCollection(searcher, null);
       },
       "gloda search",
       SEARCH_TIMEOUT_MS
     );
 
+    const truncated = messages.length > retrieve;
+    const considered = truncated ? messages.slice(0, retrieve) : messages;
+
     // searcher.scores accumulates in the order items were handed to us.
     const scores = searcher.scores || [];
-    let hits = messages.map((message, index) => hit(message, scores[index]));
+    let hits = considered.map((message, index) => hit(message, scores[index]));
     if (inFolder) {
       hits = hits.filter(inFolder);
     }
@@ -349,17 +371,30 @@ TBX_MODULE_NAMES.push("gloda");
       query,
       hits: hits.slice(offset, offset + limit),
       matched: hits.length,
-      retrieved: messages.length,
+      retrieved: considered.length,
       // The ranking only ordered what we retrieved; a deeper page may reorder.
-      truncated: messages.length >= retrieve,
+      truncated,
       indexEnabled: enabled,
     };
+    if (unmatchable.length) {
+      result.unmatchableTerms = unmatchable;
+    }
     if (!result.hits.length) {
-      result.note = enabled
-        ? "Nothing in the global index matched. Only indexed messages are searchable — " +
-          "check x.gloda.stats, or fall back to mail_search with subject/author filters."
-        : "Thunderbird's global index is disabled, so this search can never match. " +
+      if (!enabled) {
+        result.note =
+          "Thunderbird's global index is disabled, so this search can never match. " +
           "Enable it in Settings > General > Indexing, or use mail_search instead.";
+      } else if (unmatchable.length) {
+        const named = unmatchable.map((term) => JSON.stringify(term)).join(", ");
+        result.note =
+          `The index cannot match ${named} — it tokenizes into pieces shorter than ` +
+          "three characters, and every term has to match. Drop those words and search " +
+          "again, or use mail_search with a subject filter.";
+      } else {
+        result.note =
+          "Nothing in the global index matched. Only indexed messages are searchable — " +
+          "check x.gloda.stats, or fall back to mail_search with subject/author filters.";
+      }
     }
     return result;
   };
@@ -537,6 +572,6 @@ TBX_MODULE_NAMES.push("gloda");
 
   /* Pure helpers, published for the add-on's tests; see the note in core.js. */
   if (typeof TBX_TEST_HOOKS !== "undefined") {
-    TBX_TEST_HOOKS.gloda = { isoDate, folderMatcher };
+    TBX_TEST_HOOKS.gloda = { classifyTerms, folderMatcher, isoDate };
   }
 }

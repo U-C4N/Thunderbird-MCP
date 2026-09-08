@@ -351,10 +351,16 @@ const GLODA_SEARCHER_URL = "resource:///modules/gloda/GlodaMsgSearcher.sys.mjs";
  * `gloda.search` whether the corpus was deeper than it looked — so the fake
  * honours it to the row.
  *
+ * The searcher is its own collection listener: it scores each row as it arrives
+ * and passes it to whatever listener the caller hung on it. That relay is the
+ * part `gloda.search` depends on, so the fake keeps it.
+ *
  * @param {object[]} corpus  synthetic gloda messages, in relevance order.
  * @param {number[]} scores  per-row scores; defaults to descending integers.
  */
 export function fakeGlodaSearcherClass({ corpus = [], scores = null } = {}) {
+  const scoreFor = (index) => (scores ? scores[index] : corpus.length - index);
+
   return class FakeGlodaMsgSearcher {
     constructor(listener, query, matchAll) {
       this.listener = listener;
@@ -362,20 +368,33 @@ export function fakeGlodaSearcherClass({ corpus = [], scores = null } = {}) {
         .split(/\s+/)
         .filter(Boolean);
       this.matchAll = matchAll;
-      this.scores = scores || corpus.map((_message, index) => corpus.length - index);
+      this.scores = [];
       this.collection = null;
       this.query = null;
     }
 
+    onItemsAdded(items) {
+      for (const item of items) {
+        this.scores.push(scoreFor(corpus.indexOf(item)));
+      }
+      this.listener.onItemsAdded(items);
+    }
+
+    onItemsModified() {}
+
+    onItemsRemoved() {}
+
+    onQueryCompleted() {
+      this.listener.onQueryCompleted();
+    }
+
     buildFulltextQuery() {
-      const searcher = this;
       return {
-        limit(n) {
-          this.n = n;
+        limit(rows) {
+          this.rows = rows;
         },
         getCollection(collectionListener) {
-          const rows = corpus.slice(0, this.n === undefined ? corpus.length : this.n);
-          searcher.retrieved = rows.length;
+          const rows = corpus.slice(0, this.rows === undefined ? corpus.length : this.rows);
           collectionListener.onItemsAdded(rows);
           collectionListener.onQueryCompleted();
           return { items: rows };
