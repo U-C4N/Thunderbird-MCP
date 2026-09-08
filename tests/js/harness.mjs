@@ -224,3 +224,99 @@ export function fakeBrowser({ pairing = null, manifestVersion = "9.9.9" } = {}) 
   };
   return browser;
 }
+
+/**
+ * The `browser.messages` half of the WebExtension API, over headers held in
+ * memory.
+ *
+ * Thunderbird answers `list` and `query` with a `MessageList`: one page of
+ * messages plus an `id` that is present only while further pages remain, walked
+ * with `continueList` and thrown away with `abortList`. Every paging bug this
+ * suite guards against lives in that shape, so the fake reproduces it exactly —
+ * including `returnMessageListId`, which replaces the first page with a bare id
+ * string. List ids are minted in order (`list-1`, `list-2`, …) so a test can say
+ * which walk it means.
+ *
+ * @param {object} folders  folder id -> its headers, in the order Thunderbird
+ *   would return them.
+ * @param {number} pageSize  page size for `list`.
+ * @param {number} queryPageSize  page size for `query`, unless the query names
+ *   one with `messagesPerPage`.
+ */
+export function fakeMessages({ folders = {}, pageSize = 10, queryPageSize = 100 } = {}) {
+  const lists = new Map();
+  const calls = [];
+  let sequence = 0;
+
+  /** Start a walk over `items` and hand back its id. */
+  function open(items, size) {
+    sequence += 1;
+    const id = `list-${sequence}`;
+    lists.set(id, { items, offset: 0, size: Math.max(1, size) });
+    return id;
+  }
+
+  /** The next page of a live list; the last one carries no id and closes it. */
+  function page(id) {
+    const list = lists.get(id);
+    const messages = list.items.slice(list.offset, list.offset + list.size);
+    list.offset += messages.length;
+    if (list.offset >= list.items.length) {
+      lists.delete(id);
+      return { messages };
+    }
+    return { id, messages };
+  }
+
+  /** The filters `messages.query` supports that these tests exercise. */
+  function matches(header, queryInfo, folderId) {
+    if (queryInfo.subject && !String(header.subject || "").includes(queryInfo.subject)) {
+      return false;
+    }
+    if (queryInfo.folderId) {
+      const wanted = Array.isArray(queryInfo.folderId) ? queryInfo.folderId : [queryInfo.folderId];
+      if (!wanted.includes(folderId)) {
+        return false;
+      }
+    }
+    // A folder id is "<accountId>://<path>", so the account is its prefix.
+    if (queryInfo.accountId && folderId.split(":/")[0] !== queryInfo.accountId) {
+      return false;
+    }
+    return true;
+  }
+
+  return {
+    calls,
+    async list(folderId, options) {
+      calls.push({ method: "list", args: [folderId, options] });
+      return page(open([...(folders[folderId] || [])], pageSize));
+    },
+    async query(queryInfo = {}) {
+      calls.push({ method: "query", args: [queryInfo] });
+      const hits = [];
+      for (const [folderId, headers] of Object.entries(folders)) {
+        for (const header of headers) {
+          if (matches(header, queryInfo, folderId)) {
+            hits.push(header);
+          }
+        }
+      }
+      const id = open(hits, queryInfo.messagesPerPage || queryPageSize);
+      // Thunderbird's schema: the flag "will change the return value of this
+      // function and return the messageListId directly".
+      return queryInfo.returnMessageListId ? id : page(id);
+    },
+    async continueList(id) {
+      calls.push({ method: "continueList", args: [id] });
+      if (!lists.has(id)) {
+        throw new Error("Unknown or expired list");
+      }
+      return page(id);
+    },
+    async abortList(id) {
+      calls.push({ method: "abortList", args: [id] });
+      lists.delete(id);
+    },
+  };
+}

@@ -8,7 +8,14 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { fakeBrowser, fakeClock, fakeLog, fakeWebSocketClass, loadScript } from "./harness.mjs";
+import {
+  fakeBrowser,
+  fakeClock,
+  fakeLog,
+  fakeMessages,
+  fakeWebSocketClass,
+  loadScript,
+} from "./harness.mjs";
 
 describe("loadScript", () => {
   it("exposes a script's top-level var and runs it against the given globals", () => {
@@ -117,5 +124,69 @@ describe("fakeBrowser", () => {
     const pending = browser.tbx.readBridgeFile();
     resolve({ version: 1, port: 1, token: "t" });
     assert.equal((await pending).port, 1);
+  });
+});
+
+describe("fakeMessages", () => {
+  const FOLDER = "account1://Inbox";
+
+  /** `count` headers, newest first, the way Thunderbird hands them over. */
+  function sample(count, folderId = FOLDER) {
+    return Array.from({ length: count }, (_, index) => ({
+      id: 100 + index,
+      headerMessageId: `<m${index}@example.invalid>`,
+      subject: `Re: item ${index}`,
+      author: "Ada <ada@example.invalid>",
+      recipients: ["bob@example.invalid"],
+      date: 1700000000000 - index * 60000,
+      read: false,
+      flagged: false,
+      junk: false,
+      tags: [],
+      size: 1024,
+      folder: { id: folderId, path: "/Inbox" },
+    }));
+  }
+
+  it("pages a folder and leaves the id off the last page", async () => {
+    const messages = fakeMessages({ folders: { [FOLDER]: sample(12) }, pageSize: 10 });
+
+    const first = await messages.list(FOLDER, { sortType: "date", sortOrder: "descending" });
+    assert.equal(first.messages.length, 10);
+    assert.ok(first.id, "more pages remain, so the list stays open");
+
+    const last = await messages.continueList(first.id);
+    assert.equal(last.messages.length, 2);
+    assert.equal(last.id, undefined, "the last page carries no id");
+
+    await assert.rejects(messages.continueList(first.id), /Unknown or expired list/);
+  });
+
+  it("answers a query with a bare list id when the query asks for one", async () => {
+    const messages = fakeMessages({ folders: { [FOLDER]: sample(12) }, queryPageSize: 10 });
+
+    const id = await messages.query({ subject: "Re", returnMessageListId: true });
+    assert.equal(typeof id, "string", "returnMessageListId replaces the page with its id");
+
+    const first = await messages.continueList(id);
+    assert.equal(first.messages.length, 10, "the id is still on its first page");
+    assert.deepEqual(
+      (await messages.query({ subject: "item 11" })).messages.map((m) => m.id),
+      [111],
+      "subject is a case-sensitive substring match"
+    );
+  });
+
+  it("forgets an aborted list and records every call", async () => {
+    const messages = fakeMessages({ folders: { [FOLDER]: sample(12) }, pageSize: 10 });
+
+    const first = await messages.list(FOLDER, {});
+    await messages.abortList(first.id);
+
+    await assert.rejects(messages.continueList(first.id), /Unknown or expired list/);
+    assert.deepEqual(
+      messages.calls.map((call) => call.method),
+      ["list", "abortList", "continueList"]
+    );
   });
 });
