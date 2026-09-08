@@ -225,7 +225,11 @@ describe("paging", () => {
 
     assert.deepEqual(walked.pages, [5, 5, 2]);
     assert.equal(walked.cursors.at(-1), null);
-    assert.match(walked.cursors[0], /^tbx:\d+$/, "a part-read page needs a cursor of ours");
+    assert.match(
+      walked.cursors[0],
+      /^tbx:[^:]+:\d+$/,
+      "a part-read page needs a cursor of ours, naming this load"
+    );
     assert.match(
       walked.cursors[1],
       /^list-/,
@@ -253,6 +257,35 @@ describe("paging", () => {
     );
     const newest = await list({ folderId: FOLDER, limit: 3, cursor: cursors.at(-1) });
     assert.equal(newest.messages.length, 3, "the newest walk survived the eviction");
+  });
+
+  it("refuses a cursor minted by an earlier load of the script", async () => {
+    const folders = { [FOLDER]: sample(30) };
+    const first = loadHandlers(fakeMessages({ folders, pageSize: 10 }));
+    const second = loadHandlers(fakeMessages({ folders, pageSize: 10 }));
+    const stale = (await first.get("messages.list")({ folderId: FOLDER, limit: 3 })).cursor;
+    const fresh = (await second.get("messages.list")({ folderId: FOLDER, limit: 3 })).cursor;
+
+    assert.notEqual(stale, fresh, "two loads must not mint the same cursor");
+    await assert.rejects(
+      () => second.get("messages.list")({ folderId: FOLDER, limit: 3, cursor: stale }),
+      usageError(/cursor/)
+    );
+  });
+
+  it("refuses a cursor of ours from a foreign load instead of trying it", async () => {
+    const messages = fakeMessages({ folders: { [FOLDER]: sample(30) }, pageSize: 10 });
+    const list = loadHandlers(messages).get("messages.list");
+
+    await assert.rejects(
+      () => list({ folderId: FOLDER, limit: 3, cursor: "tbx:zzzz:1" }),
+      usageError(/cursor/)
+    );
+    assert.deepEqual(
+      messages.calls.filter((call) => call.method === "continueList"),
+      [],
+      "a cursor of ours must never be handed to Thunderbird"
+    );
   });
 
   it("says a raw Thunderbird cursor has expired", async () => {

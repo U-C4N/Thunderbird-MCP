@@ -14,8 +14,10 @@
  * between the two. So a cursor is one of:
  *   - a raw Thunderbird list id, when the page ended exactly on the limit and
  *     nothing was left over;
- *   - `tbx:<n>`, ours, naming the tail we parked (with the id that continues
- *     after it) because the limit stopped us mid-page.
+ *   - `tbx:<load>:<n>`, ours, naming the tail we parked (with the id that
+ *     continues after it) because the limit stopped us mid-page. `<load>` names
+ *     this load of the script, so a cursor from before a background restart is
+ *     refused rather than mistaken for one of ours.
  * Only the last 32 part-read pages are kept; the rest are dropped, and their
  * Thunderbird lists aborted, so an abandoned walk costs nothing.
  */
@@ -60,6 +62,12 @@
   const parked = new Map();
   let parkSequence = 0;
 
+  /* Every cursor we mint names this load of the script. The map above is empty
+   * again after a background restart, and without this a cursor from before it
+   * would quietly claim the new load's first parked page instead of being
+   * refused. */
+  const LOAD_ID = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+
   /** Let go of a Thunderbird list nobody can reach any more. */
   function abandonList(listId) {
     if (listId) {
@@ -76,12 +84,18 @@
       parked.delete(oldest);
     }
     parkSequence += 1;
-    const cursor = `${CURSOR_PREFIX}${parkSequence}`;
+    const cursor = `${CURSOR_PREFIX}${LOAD_ID}:${parkSequence}`;
     parked.set(cursor, { listId, rest });
     return cursor;
   }
 
-  /** Take back a page we parked, or say why the cursor is worthless. */
+  /**
+   * Take back a page we parked, or say why the cursor is worthless.
+   *
+   * Anything carrying our prefix is ours to answer for: a cursor from another
+   * load carries another load id, so it is simply not in the map, and it is
+   * refused here rather than handed to Thunderbird as if it were a list id.
+   */
   function unpark(cursor) {
     const held = parked.get(cursor);
     if (!held) {
