@@ -345,7 +345,8 @@ describe("visible state", () => {
     await world.clock.advance(BACKOFF[index]);
   }
 
-  const complaints = (world) => world.errors().filter((text) => text.includes("restart Thunderbird"));
+  const complaints = (world) =>
+    world.errors().filter((text) => text.includes("restart Thunderbird"));
 
   it("names every close and complains once when none of them handshake", async () => {
     const world = makeWorld();
