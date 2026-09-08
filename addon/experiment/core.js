@@ -34,7 +34,7 @@ const { setTimeout, clearTimeout } = ChromeUtils.importESModule(
 
 /* ------------------------------------------------------------------ modules */
 
-/** Module URLs as they exist on Thunderbird 128–153. Resolution is lazy so a
+/** Module URLs as they exist on Thunderbird 128–155. Resolution is lazy so a
  *  rename in a future release degrades one capability instead of the add-on. */
 const MODULE_URLS = {
   ExtensionPermissions: "resource://gre/modules/ExtensionPermissions.sys.mjs",

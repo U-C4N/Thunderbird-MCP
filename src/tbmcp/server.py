@@ -199,4 +199,4 @@ def _version() -> str:
 
         return version("thunderbird-mcp")
     except Exception:
-        return "1.2.1"
+        return "1.3.0"

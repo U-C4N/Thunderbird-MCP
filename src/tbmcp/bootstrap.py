@@ -346,7 +346,7 @@ def choose_interpreter(
     )
 
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 GIT_SOURCE = "git+https://github.com/U-C4N/Thunderbird-MCP"
 
 

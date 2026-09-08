@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "thunderbird-mcp"
-version = "1.2.1"
+version = "1.3.0"
 description = "MCP server that drives Thunderbird — mail, folders, contacts, calendar, filters, and settings"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -18,6 +18,7 @@ classifiers = [
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
   "Topic :: Communications :: Email",
 ]
 dependencies = [
