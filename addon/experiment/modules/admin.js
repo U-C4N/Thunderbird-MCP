@@ -452,6 +452,82 @@ TBX_MODULE_NAMES.push("admin");
     return record;
   }
 
+  /** Whether a ConsoleAPI event came from this add-on's own pages.
+   *
+   *  The store is shared by every extension, so an event is ours only when it
+   *  carries our add-on id, or — for pages that report no id — an innerID under
+   *  our moz-extension:// base URL. With no identity recorded yet nothing can be
+   *  claimed, so nothing is. */
+  function ownConsoleEvent(event) {
+    const who = H.extension;
+    if (!who || !event) {
+      return false;
+    }
+    if (event.addonId) {
+      return event.addonId === who.id;
+    }
+    const inner = typeof event.innerID === "string" ? event.innerID : "";
+    return Boolean(who.baseURL) && inner.startsWith(who.baseURL);
+  }
+
+  /** The add-on's own `console.*` output, in the same record shape as the
+   *  nsIConsoleMessage entries.
+   *
+   *  An extension page's console output goes to the ConsoleAPI storage, not to
+   *  Services.console — which is why `tb_console` never showed a single `[tbmcp]`
+   *  line, the one thing it exists to surface. Best effort: a build without the
+   *  service, or one that refuses us, just contributes nothing. */
+  function ownConsoleEvents() {
+    let events;
+    try {
+      events = Cc["@mozilla.org/consoleAPI-storage;1"]
+        .getService(Ci.nsIConsoleAPIStorage)
+        .getEvents();
+    } catch (ex) {
+      return [];
+    }
+    const records = [];
+    for (const event of events || []) {
+      if (!ownConsoleEvent(event)) {
+        continue;
+      }
+      let text;
+      try {
+        text = Array.from(event.arguments || [], (arg) =>
+          typeof arg === "string" ? arg : JSON.stringify(arg)
+        ).join(" ");
+      } catch (ex) {
+        text = `<unreadable console event: ${ex.message || ex}>`;
+      }
+      const record = {
+        message: redact(text),
+        severity: String(event.level || "log"),
+        source: "console",
+      };
+      if (event.timeStamp) {
+        record.at = new Date(event.timeStamp).toISOString();
+      }
+      records.push(record);
+    }
+    return records;
+  }
+
+  /** Records from both stores in time order, newest last. Entries without a
+   *  timestamp keep their store's own order and sort as oldest. */
+  function mergedConsole(entries) {
+    const stamped = (record, index) => ({
+      record,
+      index,
+      time: record.at ? Date.parse(record.at) : 0,
+    });
+    const rows = entries
+      .map(describeConsoleEntry)
+      .map(stamped)
+      .concat(ownConsoleEvents().map((record, index) => stamped(record, entries.length + index)));
+    rows.sort((a, b) => a.time - b.time || a.index - b.index);
+    return rows.map((row) => row.record);
+  }
+
   TBX_MODULES["admin.consoleMessages"] = async (params) => {
     const limit = Number.isInteger(params.limit) ? Math.min(Math.max(params.limit, 1), 500) : 100;
     const filter = params.filter ? String(params.filter).toLowerCase() : null;
@@ -461,20 +537,19 @@ TBX_MODULE_NAMES.push("admin");
     } catch (ex) {
       throw H.unsupported(`the error console is not readable: ${ex.message || ex}`);
     }
+    const records = mergedConsole(entries);
     const matched = [];
-    for (const entry of entries) {
-      const record = describeConsoleEntry(entry);
+    for (const record of records) {
       if (filter && !record.message.toLowerCase().includes(filter)) {
         continue;
       }
       matched.push(record);
     }
-    // Newest last: that is the order the console keeps them in, and reading a tail
-    // top to bottom is how anyone actually debugs.
+    // Newest last: reading a tail top to bottom is how anyone actually debugs.
     return {
       messages: matched.slice(-limit),
       matched: matched.length,
-      buffered: entries.length,
+      buffered: records.length,
       filter: params.filter || null,
     };
   };

@@ -231,6 +231,13 @@ const H = {
     }
   },
 
+  /** Who we are, recorded by getAPI() because `context` reaches nowhere else.
+   *
+   *  `admin.consoleMessages` needs it to tell our own console output apart from
+   *  every other add-on's in the shared ConsoleAPI store. Undefined until the API
+   *  is built, so anything reading it must cope with that. */
+  extension: null,
+
   /** Wrap a callback-style Thunderbird API as a promise with a deadline. */
   withTimeout(promise, ms, what) {
     let timer = null;
@@ -329,6 +336,16 @@ this.tbx = class extends ExtensionAPI {
   }
 
   getAPI(context) {
+    // The only place the privileged half ever sees its own identity; keep it
+    // where the modules can reach it (see H.extension).
+    try {
+      H.extension = {
+        id: context.extension.id,
+        baseURL: String(context.extension.baseURL || ""),
+      };
+    } catch (ex) {
+      H.extension = null;
+    }
     return {
       tbx: wired({
         /* -------------------------------------------------- bridge plumbing */
