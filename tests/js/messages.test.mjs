@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { fakeBrowser, fakeLog, fakeMessages, loadScript } from "./harness.mjs";
+import { fakeBrowser, fakeMessages, loadScript } from "./harness.mjs";
 
 const FOLDER = "account1://Inbox";
 
@@ -37,13 +37,13 @@ function sample(count, folderId = FOLDER) {
  * The real registry.js supplies tbxError and tbxUtil so failures carry the same
  * shape the daemon sees; tbxRegistry is faked only to catch the definitions.
  */
-function loadHandlers(messages, browser = fakeBrowser()) {
+function loadHandlers(messages) {
   const registry = loadScript("background/registry.js");
+  const browser = fakeBrowser();
   const handlers = new Map();
   browser.messages = messages;
   loadScript("background/handlers/messages.js", {
     browser,
-    tbxLog: fakeLog(),
     tbxError: registry.tbxError,
     tbxUtil: registry.tbxUtil,
     tbxRegistry: {
@@ -168,5 +168,100 @@ describe("messages.query", () => {
 
     assert.equal(next.messages.length, 5, "the walk carried on");
     assert.equal(next.scope, undefined, "the scope belongs to the first page only");
+  });
+});
+
+describe("paging", () => {
+  /** Walk a handler with its own cursors until it says there is nothing left. */
+  async function walk(handler, params) {
+    const seen = [];
+    const pages = [];
+    const cursors = [];
+    for (let guard = 0, cursor = null; guard < 200; guard += 1) {
+      const result = await handler({ ...params, cursor });
+      pages.push(result.messages.length);
+      seen.push(...ids(result));
+      cursors.push(result.cursor);
+      cursor = result.cursor;
+      if (!cursor) {
+        return { seen, pages, cursors };
+      }
+    }
+    throw new Error("the walk never ran out of cursors");
+  }
+
+  it("walks a folder without gaps or duplicates, whatever the limit", async () => {
+    for (const limit of [1, 3, 7, 25]) {
+      const messages = fakeMessages({ folders: { [FOLDER]: sample(30) }, pageSize: 10 });
+      const list = loadHandlers(messages).get("messages.list");
+      const whole = await list({ folderId: FOLDER, limit: 30 });
+
+      const walked = await walk(list, { folderId: FOLDER, limit });
+
+      assert.equal(walked.seen.length, 30, `limit ${limit} lost messages`);
+      assert.deepEqual(walked.seen, ids(whole), `limit ${limit} walked out of order`);
+    }
+  });
+
+  it("walks a query without gaps or duplicates, whatever the limit", async () => {
+    for (const limit of [1, 3, 7, 25]) {
+      const messages = fakeMessages({ folders: { [FOLDER]: sample(30) }, queryPageSize: 10 });
+      const query = loadHandlers(messages).get("messages.query");
+      const params = { query: { subject: "Re: item" } };
+      const whole = await query({ ...params, limit: 30 });
+
+      const walked = await walk(query, { ...params, limit });
+
+      assert.equal(walked.seen.length, 30, `limit ${limit} lost messages`);
+      assert.deepEqual(walked.seen, ids(whole), `limit ${limit} walked out of order`);
+    }
+  });
+
+  it("returns the short last page and then stops", async () => {
+    const messages = fakeMessages({ folders: { [FOLDER]: sample(12) }, pageSize: 10 });
+    const list = loadHandlers(messages).get("messages.list");
+
+    const walked = await walk(list, { folderId: FOLDER, limit: 5 });
+
+    assert.deepEqual(walked.pages, [5, 5, 2]);
+    assert.equal(walked.cursors.at(-1), null);
+    assert.match(walked.cursors[0], /^tbx:\d+$/, "a part-read page needs a cursor of ours");
+    assert.match(
+      walked.cursors[1],
+      /^list-/,
+      "a page that ended on the limit leaves nothing over, so the list id will do"
+    );
+  });
+
+  it("evicts the oldest part-read page and aborts the list behind it", async () => {
+    const messages = fakeMessages({ folders: { [FOLDER]: sample(30) }, pageSize: 10 });
+    const list = loadHandlers(messages).get("messages.list");
+    const cursors = [];
+    for (let walks = 0; walks < 33; walks += 1) {
+      // Each one stops 3 messages into a 10-message page and is then abandoned.
+      cursors.push((await list({ folderId: FOLDER, limit: 3 })).cursor);
+    }
+
+    // The fake mints list ids in order, so the first walk's list is "list-1".
+    assert.deepEqual(
+      messages.calls.filter((call) => call.method === "abortList").map((call) => call.args[0]),
+      ["list-1"]
+    );
+    await assert.rejects(
+      () => list({ folderId: FOLDER, limit: 3, cursor: cursors[0] }),
+      usageError(/cursor/)
+    );
+    const newest = await list({ folderId: FOLDER, limit: 3, cursor: cursors.at(-1) });
+    assert.equal(newest.messages.length, 3, "the newest walk survived the eviction");
+  });
+
+  it("says a raw Thunderbird cursor has expired", async () => {
+    const messages = fakeMessages({ folders: { [FOLDER]: sample(30) }, pageSize: 10 });
+    const list = loadHandlers(messages).get("messages.list");
+
+    await assert.rejects(
+      () => list({ folderId: FOLDER, limit: 3, cursor: "list-404" }),
+      usageError(/expired/)
+    );
   });
 });
