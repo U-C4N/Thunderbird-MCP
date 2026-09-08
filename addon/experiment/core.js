@@ -22,6 +22,16 @@
 
 "use strict";
 
+/* ------------------------------------------------------------------- timers */
+
+/* The sandbox has no DOM globals, so the bare `setTimeout` every deadline here
+ * used to call was a ReferenceError: it rejected the deadline promise before the
+ * work it guarded had started, which took out gloda search entirely. Chrome code
+ * gets its timers from the platform's Timer module instead. */
+const { setTimeout, clearTimeout } = ChromeUtils.importESModule(
+  "resource://gre/modules/Timer.sys.mjs"
+);
+
 /* ------------------------------------------------------------------ modules */
 
 /** Module URLs as they exist on Thunderbird 128–153. Resolution is lazy so a
@@ -222,12 +232,13 @@ const H = {
 
   /** Wrap a callback-style Thunderbird API as a promise with a deadline. */
   withTimeout(promise, ms, what) {
-    return Promise.race([
-      promise,
-      new Promise((_resolve, reject) =>
-        setTimeout(() => reject(new Error(`${what} timed out after ${ms}ms`)), ms)
-      ),
-    ]);
+    let timer = null;
+    const deadline = new Promise((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(`${what} timed out after ${ms}ms`)), ms);
+    });
+    // Whichever way the race lands, the timer has to go: an armed one holds the
+    // deadline's rejection alive and keeps Thunderbird awake for nothing.
+    return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
   },
 };
 
@@ -472,3 +483,11 @@ this.tbx = class extends ExtensionAPI {
     };
   }
 };
+
+/* Block-scoped helpers, published for the add-on's tests.
+ *
+ * `TBX_TEST_HOOKS` does not exist in Thunderbird, so this statement is a no-op
+ * there — which is the point: no test-only branch ships inside a handler. */
+if (typeof TBX_TEST_HOOKS !== "undefined") {
+  TBX_TEST_HOOKS.core = { H, mod, needMod };
+}
