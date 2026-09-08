@@ -3,11 +3,14 @@
 The `kind` values mirror `docs/PROTOCOL.md`. They exist so the tool layer can
 decide *how* a failure should reach the model:
 
-- `usage`, `blocked`, `unsupported`, `thunderbird` -> raise a plain exception, which
-  the SDK turns into `CallToolResult(is_error=True)`. The model sees the message and
-  can correct itself.
-- `internal` and transport failures -> also surfaced to the model, because a hidden
-  JSON-RPC error just looks like a hang from the user's side.
+- `usage`, `blocked`, `unsupported`, `thunderbird` -> raise one of these from the tool
+  body. `Registrar._add` re-raises anything derived from `TbmcpError` as the SDK's
+  `ToolError`, which is what turns it into a `CallToolResult(is_error=True)` carrying
+  the message; an exception the SDK reads as a crash reaches the model as nothing but
+  "Error executing tool <name>". So wrapped, the model sees the message and can
+  correct itself.
+- `internal` and transport failures -> the same path, because a hidden JSON-RPC error
+  just looks like a hang from the user's side.
 """
 
 from __future__ import annotations

@@ -7,6 +7,7 @@ otherwise only visible once a real client refuses to load the server.
 from __future__ import annotations
 
 import pytest
+from mcp import Client
 
 from tbmcp.config import ALL_TOOLSETS, DEFAULT_TOOLSETS, Settings, parse_toolsets
 from tbmcp.server import build_server
@@ -136,3 +137,41 @@ def test_parse_toolsets() -> None:
     assert parse_toolsets("settings,mail") == ("mail", "settings")
     with pytest.raises(SystemExit):
         parse_toolsets("nonsense")
+
+
+# ------------------------------------------------------- what a failure looks like
+
+
+def _mail_server(bridge):
+    return build_server(Settings().merged_with(toolsets=("mail",)), bridge=bridge)
+
+
+def _text(result) -> str:
+    return " ".join(getattr(block, "text", "") for block in result.content)
+
+
+async def test_a_deliberate_error_reaches_the_model(fake_bridge) -> None:
+    """The whole point of a `UsageError` is the instruction it carries.
+
+    The SDK withholds the text of anything it reads as a crash — under mcp >= 2.1 the
+    model is told "Error executing tool <name>" and nothing else — so this only holds
+    while the registrar re-raises our failures as the SDK's own `ToolError`.
+    """
+    bridge = fake_bridge()
+    async with Client(_mail_server(bridge)) as client:
+        result = await client.call_tool("mail_search", {})
+    assert result.is_error
+    text = _text(result)
+    assert "Give at least one filter" in text
+    assert "Error executing tool mail_search: Error executing tool" not in text, text
+
+
+async def test_a_blocked_error_names_what_would_unblock_it_once(fake_bridge) -> None:
+    bridge = fake_bridge()
+    async with Client(_mail_server(bridge)) as client:
+        result = await client.call_tool("mail_delete", {"message_ids": [42]})
+    assert result.is_error
+    text = _text(result)
+    assert "confirm=true" in text
+    assert text.count("requires:") == 1, text
+    assert "Error executing tool mail_delete: Error executing tool" not in text, text
