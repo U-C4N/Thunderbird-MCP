@@ -1,5 +1,5 @@
 [![CI](https://github.com/U-C4N/Thunderbird-MCP/actions/workflows/ci.yml/badge.svg)](https://github.com/U-C4N/Thunderbird-MCP/actions/workflows/ci.yml)
-[![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/python-3.11%20%E2%80%93%203.14-blue)](https://www.python.org/)
 [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-2.0-6E56CF)](https://github.com/modelcontextprotocol/python-sdk)
 [![Thunderbird](https://img.shields.io/badge/Thunderbird-128%20%E2%80%93%20155-0A84FF)](https://www.thunderbird.net/)
 [![Tools](https://img.shields.io/badge/tools-112-brightgreen)](docs/TOOL-REFERENCE.md)
@@ -15,6 +15,10 @@ Thunderbird you have open, driven through its own internals.
 
 Written in Python, built for **Claude Code** and **Codex CLI**, and able to drive one
 Thunderbird from both at the same time.
+
+**1.3.0** (2026-09-08) makes every search tool work again, stops paging from
+dropping messages, and teaches the bridge to say what is wrong when it cannot
+connect. Full list in [CHANGELOG.md](CHANGELOG.md).
 
 ### What you can ask for
 
@@ -33,6 +37,10 @@ Thunderbird from both at the same time.
   over an existing folder to check they do what you meant.
 - **Keep a calendar honest.** Events and tasks, with recurring items addressed as a
   series unless you name one occurrence.
+- **Find out why it is not working.** `tb_status`, `tb_diagnostics` and `tbmcp doctor`
+  report both sides of the bridge — whether the add-on is connecting, whether it is
+  completing the handshake, and which add-on version is actually installed — and name
+  the remedy instead of guessing.
 
 > [!NOTE]
 > Everything documented here was verified against a live **Thunderbird 155** on
@@ -502,16 +510,16 @@ active, is itself the diagnosis.
 | settings tools fail but mail tools work | same cause; check `privileged modules` in `doctor` |
 | full-text search finds nothing | Thunderbird's global indexer is off (Settings → General) |
 | raw message source unavailable on IMAP | the message is not stored offline → `folder_sync_offline` |
-| the first tool call after a killed daemon fails | the add-on takes ~40-60 s to reattach after an *abnormal* daemon exit; retry, or `tbmcp doctor --wait 60`. A clean exit reattaches in about a second. [Details](docs/VERIFIED-FINDINGS.md) |
+| the first tool call after a killed daemon fails | the add-on reattaches within a few seconds once a new daemon advertises itself (1.3.0's transport watchdogs); retry, or `tbmcp doctor --wait 30`. Before 1.3.0 this took 40–60 s — [details](docs/VERIFIED-FINDINGS.md) |
 | Codex reports a startup timeout | raise `startup_timeout_sec`; Codex defaults to 10 s |
 | Claude Code truncates a large result | raise `MAX_MCP_OUTPUT_TOKENS` (default 25,000) |
 | A dependency fails with "DLL load failed" or "cannot open shared object file" | A binary your OS will not load — Windows Application Control blocks unsigned, low-reputation wheels. `bootstrap` detects this and downgrades the offending package automatically; run `python bootstrap.py` and read the `binaries` step. |
 
 `TBMCP_DEBUG=1` turns on verbose logging to stderr. `TBMCP_STATE_DIR` moves the
-daemon's advertisement, lock and log out of the platform default. The add-on logs to Thunderbird's
-error console with a `[tbmcp]` prefix, and `tb_console` returns those lines as a tool.
-`tb_console` also includes the add-on's own `console.*` output, which the error
-console window does not show.
+daemon's advertisement, lock and log out of the platform default; `doctor` prints
+the log's path. The add-on logs to Thunderbird's error console with a `[tbmcp]`
+prefix, and `tb_console` returns those lines as a tool — including the add-on's own
+`console.*` output, which the error console window does not show.
 
 ---
 
@@ -520,7 +528,7 @@ console window does not show.
 ```bash
 uv venv && uv pip install -e ".[dev]"
 
-pytest                                  # 286 tests, no Thunderbird needed
+pytest                                  # 288 tests, no Thunderbird needed
 node --test "tests/js/*.test.mjs"       # 111 add-on tests under node:vm, no Thunderbird needed
 ruff check . && ruff format --check .
 python tools/check_consistency.py       # do all three layers still agree?
@@ -535,6 +543,11 @@ Three layers have to agree on method names — the Python tools, the add-on hand
 and the privileged forwarding list — and nothing notices when they stop agreeing until
 runtime. `check_consistency.py` compares them, validates every JavaScript file, and
 checks the manifest lists exactly the scripts that exist. Run it before you commit.
+
+The add-on's own logic is tested under `node:vm` (`tests/js`): the real background
+and privileged scripts run against fakes of the WebExtension and XPCOM surfaces, so
+the sandbox rules that broke 1.2.0's search — no DOM timers, a separate realm,
+errors that must be `ExtensionError`s — are exercised without a Thunderbird.
 
 | Document | |
 | --- | --- |
@@ -563,7 +576,7 @@ Related work: [Autocad-MCP](https://github.com/U-C4N/Autocad-MCP) ·
 Issues and pull requests are welcome. Before opening one:
 
 ```bash
-pytest && ruff check . && python tools/check_consistency.py
+pytest && node --test "tests/js/*.test.mjs" && ruff check . && python tools/check_consistency.py
 ```
 
 `check_consistency.py` is the important one — it catches the mismatches between the
