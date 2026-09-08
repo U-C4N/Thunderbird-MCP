@@ -35,7 +35,7 @@ Thunderbird from both at the same time.
   series unless you name one occurrence.
 
 > [!NOTE]
-> Everything documented here was verified against a live **Thunderbird 153** on
+> Everything documented here was verified against a live **Thunderbird 155** on
 > Windows 11, not inferred from documentation. The measurements, and the traps found
 > the hard way, are in [docs/VERIFIED-FINDINGS.md](docs/VERIFIED-FINDINGS.md).
 
@@ -88,21 +88,25 @@ Python
 Thunderbird
   executable                 C:\Program Files\Mozilla Thunderbird\thunderbird.exe
   running                    True
-  add-on version (source)    1.2.0
+  add-on version (source)    1.3.0
+  add-on version (installed) 1.3.0
   profile                    C:\Users\VECTOR\AppData\Roaming\Thunderbird\Profiles\81l4u5ba.default-release
-  accounts (from prefs.js)   2
-  outgoing servers           1
+  accounts (from prefs.js)   3
+  outgoing servers           2
   global index db            True
-  add-on startup report      2026-08-11T06:41:40.527Z
+  add-on startup report      2026-09-08T16:22:20.621Z
   privileged modules         12 loaded
   bridge methods             128
 
 Bridge
-  daemon                     pid 31120
+  daemon                     pid 54640
+  daemon log                 C:\Users\VECTOR\AppData\Local\tbmcp\daemon.log
   connected                  True
-  add-on version (live)      1.2.0
+  add-on version (live)      1.3.0
   privileged half            True
-  app                        Thunderbird 153.0.2
+  app                        Thunderbird 155.0
+  add-on handshakes          1 attempt; last welcomed 0 s ago (Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:155.0) Gecko/20100101 Thunderbird/155.0)
+  add-on transport           connected; 0 failed attempts
   tb_status tool call        connected
 
 Tools
@@ -475,8 +479,8 @@ Full detail in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and
 
 ## Requirements
 
-- Thunderbird 128 or newer — developed and verified against **153**
-- Python 3.11+
+- Thunderbird 128 or newer — developed and verified against **155**
+- Python 3.11 to 3.14
 - Windows, macOS or Linux, including Snap and Flatpak Thunderbird
 
 ---
@@ -492,6 +496,8 @@ active, is itself the diagnosis.
 | Symptom | Cause |
 | --- | --- |
 | "Thunderbird is not connected" | Thunderbird is closed, or the add-on is not installed |
+| the add-on connects but never completes the handshake (`tb_status` and `doctor` say so) | restart Thunderbird; `doctor` shows the daemon's view (`add-on handshakes`) and the add-on's (`add-on transport`), and `<state dir>/tbmcp/daemon.log` has the rest |
+| `doctor` warns the installed add-on is older than the package | `tbmcp install-addon` and restart Thunderbird |
 | "the add-on never wrote its startup report" | the privileged half did not load → `tbmcp install-addon` again |
 | settings tools fail but mail tools work | same cause; check `privileged modules` in `doctor` |
 | full-text search finds nothing | Thunderbird's global indexer is off (Settings → General) |
@@ -503,6 +509,8 @@ active, is itself the diagnosis.
 
 `TBMCP_DEBUG=1` turns on verbose logging to stderr. The add-on logs to Thunderbird's
 error console with a `[tbmcp]` prefix, and `tb_console` returns those lines as a tool.
+`tb_console` also includes the add-on's own `console.*` output, which the error
+console window does not show.
 
 ---
 
@@ -511,12 +519,14 @@ error console with a `[tbmcp]` prefix, and `tb_console` returns those lines as a
 ```bash
 uv venv && uv pip install -e ".[dev]"
 
-pytest                                  # 181 tests, no Thunderbird needed
+pytest                                  # 286 tests, no Thunderbird needed
+node --test "tests/js/*.test.mjs"       # 111 add-on tests under node:vm, no Thunderbird needed
 ruff check . && ruff format --check .
 python tools/check_consistency.py       # do all three layers still agree?
 python tools/build_xpi.py build         # build the add-on package
 python tools/gen_tool_reference.py      # regenerate the tool docs from the code
 python tools/smoke_live.py              # read-only checks against a live Thunderbird
+python tools/smoke_search.py            # the search tools, paging and errors, against a live Thunderbird
 python tools/smoke_write.py             # gated-write checks; leaves the profile unchanged
 ```
 

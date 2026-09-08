@@ -43,7 +43,7 @@ The honest cost of this choice: the connection lives in the add-on's background 
 so its lifetime and reconnect behaviour are now ours to manage. A server *inside*
 Thunderbird would simply be listening whenever Thunderbird is up. In practice the page
 is persistent on 153 and stays connected, but reattaching after the daemon dies
-abnormally is still slower than it should be — measured, and left open, in
+abnormally is still slower than it should be — measured in
 [`VERIFIED-FINDINGS.md`](VERIFIED-FINDINGS.md).
 
 Benefits over an in-Thunderbird HTTP server:
@@ -106,6 +106,24 @@ src/tbmcp/
 docs/
 tests/
 ```
+
+## Testing
+
+Three layers, because no single one can see the whole chain:
+
+- **pytest** (`tests/`) runs the Python side end to end through an in-memory MCP
+  client, with the bridge replaced by a recorder (`tests/conftest.py`). It proves
+  argument validation, gating, the shape of every result and the daemon's own
+  protocol, and needs no Thunderbird — which is also its limit: it cannot see the
+  add-on, and every 1.2.0 search defect lived there.
+- **node** (`tests/js`, `node --test "tests/js/*.test.mjs"`) runs the add-on's
+  real background and privileged scripts under `node:vm` against fakes of the
+  WebExtension and XPCOM surfaces (`tests/js/harness.mjs`). The privileged half is
+  spliced exactly as `build_xpi.py` splices it, so the sandbox rules — no DOM
+  timers, a separate realm, errors that must be `ExtensionError`s — are exercised.
+- **live** (`tools/smoke_live.py`, `tools/smoke_search.py`) drives a running
+  Thunderbird read-only and is the only layer that sees Thunderbird's actual
+  behaviour. It is not in CI; run it before a release.
 
 ## Wire protocol
 
