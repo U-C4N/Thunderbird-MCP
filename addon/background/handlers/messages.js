@@ -386,12 +386,19 @@
         "saving files needs the privileged half of the add-on, which did not load"
       );
     }
-    const written = await browser.tbx.writeFile({
-      directory,
-      filename: params.filename || file.name,
-      base64: tbxBase64.fromArrayBuffer(buffer),
-      overwrite: Boolean(params.overwrite),
-    });
+    let written;
+    try {
+      written = await browser.tbx.writeFile({
+        directory,
+        filename: params.filename || file.name,
+        base64: tbxBase64.fromArrayBuffer(buffer),
+        overwrite: Boolean(params.overwrite),
+      });
+    } catch (ex) {
+      // "already exists — pass overwrite=true" is exactly the kind of refusal the
+      // caller can act on, and it only survives the hop packed into a message.
+      throw tbxError.fromWire(ex) || ex;
+    }
     return { path: written.path, bytes: written.bytes, name: written.name };
   });
 

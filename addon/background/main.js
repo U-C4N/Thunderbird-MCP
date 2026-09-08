@@ -57,7 +57,7 @@
       tbxLog.error(
         "could not stop the background page being suspended, so the bridge will drop " +
           "out after about 30s of inactivity:",
-        ex.message || ex
+        tbxError.readable(ex)
       );
     }
 
@@ -78,7 +78,7 @@
     } catch (ex) {
       tbxLog.warn(
         "could not grant messages.send, so sending will open a compose window:",
-        ex.message || ex
+        tbxError.readable(ex)
       );
     }
 
@@ -105,7 +105,7 @@
         throw new Error(`no answer within ${PROBE_TIMEOUT_MS}ms`);
       }
     } catch (ex) {
-      tbxLog.warn("could not write the status file:", ex.message || ex);
+      tbxLog.warn("could not write the status file:", tbxError.readable(ex));
     }
   }
 

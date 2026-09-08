@@ -22,7 +22,7 @@
       const report = await browser.tbx.availableModules();
       known = report.methods || [];
     } catch (ex) {
-      tbxLog.warn("could not enumerate privileged methods:", ex.message || ex);
+      tbxLog.warn("could not enumerate privileged methods:", tbxError.readable(ex));
       known = [];
     }
     return known;

@@ -277,6 +277,27 @@ function wireError(ex) {
   return { message };
 }
 
+/**
+ * Put every method of the API surface behind `wireError`.
+ *
+ * Applied once to the whole namespace rather than method by method, so a method
+ * added later cannot forget: the boundary is a property of the surface, not of
+ * any one call. `invoke` therefore does no wrapping of its own.
+ */
+function wired(api) {
+  const out = {};
+  for (const [name, fn] of Object.entries(api)) {
+    out[name] = async (...args) => {
+      try {
+        return await fn(...args);
+      } catch (ex) {
+        throw wireError(ex);
+      }
+    };
+  }
+  return out;
+}
+
 /* --------------------------------------------------------------- dispatch table */
 
 /** Privileged handlers, keyed by the method name minus its "x." prefix.
@@ -309,7 +330,7 @@ this.tbx = class extends ExtensionAPI {
 
   getAPI(context) {
     return {
-      tbx: {
+      tbx: wired({
         /* -------------------------------------------------- bridge plumbing */
 
         async readBridgeFile() {
@@ -507,19 +528,14 @@ this.tbx = class extends ExtensionAPI {
          * `browser.tbx.invoke("prefs.get", params)`.
          */
         async invoke(method, params) {
-          try {
-            const handler = TBX_MODULES[method];
-            if (!handler) {
-              const known = Object.keys(TBX_MODULES).sort().join(", ");
-              throw H.usage(`unknown privileged method ${method} (known: ${known})`);
-            }
-            // Awaited, not returned: a rejection has to reach the catch below.
-            return await handler(params || {});
-          } catch (ex) {
-            throw wireError(ex);
+          const handler = TBX_MODULES[method];
+          if (!handler) {
+            const known = Object.keys(TBX_MODULES).sort().join(", ");
+            throw H.usage(`unknown privileged method ${method} (known: ${known})`);
           }
+          return handler(params || {});
         },
-      },
+      }),
     };
   }
 };

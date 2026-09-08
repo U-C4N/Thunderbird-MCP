@@ -128,4 +128,68 @@ describe("tbxError.fromWire", () => {
     assert.equal(tbxError.fromWire(new Error("plain")), null);
     assert.equal(tbxError.fromWire(new Error("tbxerr:not json")), null);
   });
+
+  it("logs the message inside the envelope rather than the envelope", () => {
+    const { tbxError } = loadScript("background/registry.js");
+
+    assert.equal(
+      tbxError.readable(new Error('tbxerr:{"kind":"thunderbird","message":"the timer failed"}')),
+      "the timer failed"
+    );
+    assert.equal(tbxError.readable(new Error("plain")), "plain");
+  });
+});
+
+/** registry.js and the messages handlers in one page scope. */
+function loadMessages(writeFile) {
+  const browser = fakeBrowser();
+  browser.tbx.writeFile = writeFile;
+  browser.messages = {
+    getAttachmentFile: async () => ({
+      name: "invoice.pdf",
+      arrayBuffer: async () => new ArrayBuffer(0),
+    }),
+  };
+  const ctx = loadScript("background/registry.js", {
+    browser,
+    tbxLog: fakeLog(),
+    btoa: (binary) => Buffer.from(binary, "binary").toString("base64"),
+  });
+  return runInContext(ctx, "background/handlers/messages.js");
+}
+
+describe("saving an attachment through the privileged half", () => {
+  it("keeps a refused write refused, and says what would let it through", async () => {
+    const ctx = loadMessages(
+      tagged({
+        kind: "blocked",
+        message: "/out/invoice.pdf already exists",
+        needs: ["overwrite=true, or a different filename"],
+      })
+    );
+
+    const ex = await failure(
+      ctx.tbxRegistry.invoke("messages.saveAttachment", {
+        messageId: 42,
+        partName: "1.2",
+        directory: "/out",
+      })
+    );
+
+    assert.equal(ex.tbxKind, "blocked");
+    assert.equal(ex.message, "/out/invoice.pdf already exists");
+    assert.match([...ex.needs].join(" "), /overwrite=true/);
+  });
+
+  it("reports a write that worked", async () => {
+    const ctx = loadMessages(async () => ({ path: "/out/invoice.pdf", bytes: 0, name: "x.pdf" }));
+
+    const written = await ctx.tbxRegistry.invoke("messages.saveAttachment", {
+      messageId: 42,
+      partName: "1.2",
+      directory: "/out",
+    });
+
+    assert.equal(written.path, "/out/invoice.pdf");
+  });
 });

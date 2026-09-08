@@ -55,6 +55,12 @@ var tbxError = {
         return this.thunderbird(payload.message, extra);
     }
   },
+  /** What to print about a failure: our envelope unwrapped, or the message as-is.
+   *  For a log line, where the kind and the needs have nowhere to go. */
+  readable(ex) {
+    const typed = this.fromWire(ex);
+    return String((typed && typed.message) || (ex && ex.message) || ex);
+  },
   /** Normalise anything thrown into the wire shape. */
   serialize(ex) {
     if (!ex) {

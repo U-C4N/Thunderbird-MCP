@@ -36,23 +36,32 @@ describe("H.withTimeout", () => {
   });
 });
 
-/** The dispatch entry point, plus the lexical helpers a test needs to drive it. */
-function experiment(globals = fakeSandbox()) {
+/** The whole privileged API, plus the lexical helpers a test needs to drive it. */
+function experiment(globals = fakeSandbox(), extension = {}) {
   const ctx = loadExperiment(globals);
-  const api = new ctx.tbx().getAPI({ extension: {} }).tbx;
-  return { hooks: ctx.TBX_TEST_HOOKS.core, invoke: (method, params) => api.invoke(method, params) };
+  const api = new ctx.tbx().getAPI({ extension }).tbx;
+  return {
+    api,
+    hooks: ctx.TBX_TEST_HOOKS.core,
+    invoke: (method, params) => api.invoke(method, params),
+  };
 }
 
-/** The payload the background page gets to parse out of a failed invoke. */
-async function envelope(promise) {
+/** The error a call failed with, whatever realm minted it. */
+async function rejection(promise) {
   try {
     await promise;
   } catch (ex) {
-    const message = String(ex.message);
-    assert.ok(message.startsWith("tbxerr:"), `not a tagged error: ${message}`);
-    return JSON.parse(message.slice("tbxerr:".length));
+    return ex;
   }
-  assert.fail("the call was expected to fail");
+  return assert.fail("the call was expected to fail");
+}
+
+/** The payload the background page gets to parse out of a failed call. */
+async function envelope(promise) {
+  const message = String((await rejection(promise)).message);
+  assert.ok(message.startsWith("tbxerr:"), `not a tagged error: ${message}`);
+  return JSON.parse(message.slice("tbxerr:".length));
 }
 
 describe("invoke", () => {
@@ -123,5 +132,40 @@ describe("invoke", () => {
 
     // A plain object is the only other shape normalizeError keeps a message for.
     assert.equal((await envelope(invoke("test.thing", {}))).message, "subject is required");
+  });
+});
+
+describe("the rest of the API surface", () => {
+  it("packs a blocked write into the envelope, though it never goes through invoke", async () => {
+    const globals = fakeSandbox();
+    globals.IOUtils = { ...globals.IOUtils, exists: async () => true };
+    const { api } = experiment(globals);
+
+    const failure = await rejection(
+      api.writeFile({ directory: "/out", filename: "invoice.pdf", base64: "", overwrite: false })
+    );
+
+    assert.equal(failure.constructor.name, "ExtensionError");
+    assert.ok(String(failure.message).startsWith("tbxerr:"));
+    const payload = JSON.parse(String(failure.message).slice("tbxerr:".length));
+    assert.equal(payload.kind, "blocked");
+    assert.match(payload.message, /already exists/);
+    assert.match(payload.needs.join(" "), /overwrite=true/);
+  });
+
+  it("packs a usage failure from a method that is not invoke", async () => {
+    const extension = { hasPermission: () => false, manifest: { optional_permissions: [] } };
+    const { api } = experiment(fakeSandbox(), extension);
+
+    const payload = await envelope(api.grantOptionalPermission("messages.send"));
+
+    assert.equal(payload.kind, "usage");
+    assert.match(payload.message, /optional_permissions/);
+  });
+
+  it("leaves a method that succeeds alone", async () => {
+    const { api } = experiment();
+
+    assert.equal((await api.appInfo()).name, "Thunderbird");
   });
 });

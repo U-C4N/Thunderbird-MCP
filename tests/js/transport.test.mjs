@@ -42,6 +42,9 @@ function capabilityStub(overrides = {}) {
   };
 }
 
+/** The error helpers, from the script that declares them; registry.js loads first. */
+const { tbxError } = loadScript("background/registry.js");
+
 /** The real capabilities module, against the same browser and clock. */
 function loadCapabilities({
   browser = fakeBrowser(),
@@ -50,6 +53,7 @@ function loadCapabilities({
 } = {}) {
   const context = loadScript("background/capabilities.js", {
     browser,
+    tbxError,
     tbxLog: fakeLog(),
     tbxRegistry: { methods: () => methods },
     setTimeout: clock.setTimeout,
@@ -659,6 +663,7 @@ describe("startup wiring", () => {
     const starts = [];
     loadScript("background/main.js", {
       browser,
+      tbxError,
       tbxLog: fakeLog(),
       tbxRegistry: { methods: () => ["mail.list"] },
       tbxCapabilities: capabilityStub(),
@@ -685,6 +690,7 @@ describe("startup wiring", () => {
     const starts = [];
     loadScript("background/main.js", {
       browser,
+      tbxError,
       tbxLog: fakeLog(),
       tbxRegistry: { methods: () => ["mail.list"] },
       tbxCapabilities: loadCapabilities({ browser, clock }),

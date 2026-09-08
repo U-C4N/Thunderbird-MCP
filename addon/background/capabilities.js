@@ -88,7 +88,7 @@ var tbxCapabilities = (() => {
           lastAppInfo = await browser.tbx.appInfo();
           return lastAppInfo;
         } catch (ex) {
-          tbxLog.debug("appInfo failed:", ex.message || ex);
+          tbxLog.debug("appInfo failed:", tbxError.readable(ex));
         }
       }
       // The cache is only written by an answer. A probe that failed must not be
@@ -109,7 +109,10 @@ var tbxCapabilities = (() => {
           lastPrivilegedModules = await browser.tbx.availableModules();
         } catch (ex) {
           // Same as above: keep the last list we were actually given.
-          tbxLog.warn("the privileged half loaded but is not answering:", ex.message || ex);
+          tbxLog.warn(
+            "the privileged half loaded but is not answering:",
+            tbxError.readable(ex)
+          );
         }
       }
       return snapshot(lastPrivilegedModules);
