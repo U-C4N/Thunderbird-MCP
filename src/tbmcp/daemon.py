@@ -560,9 +560,17 @@ class Daemon:
         log.info("pairing file written to %s (port %d)", path, port)
 
     def _cleanup(self) -> None:
-        with contextlib.suppress(OSError):
-            (self.profile.path / BRIDGE_FILE).unlink()
-        ipc.DaemonInfo.clear()
+        """Remove what we published — and only what is still ours.
+
+        A superseded daemon runs this on its way out too. Unlinking unconditionally
+        deleted the *winner's* pairing file and advertisement, which left the add-on
+        holding a token nothing was listening for and `serve` with nothing to find.
+        """
+        path = self.profile.path / BRIDGE_FILE
+        if _bridge_file_pid(path) == os.getpid():
+            with contextlib.suppress(OSError):
+                path.unlink()
+        ipc.DaemonInfo.clear_if_owned(os.getpid())
 
     async def _watch_idle(self) -> None:
         if self.idle_timeout <= 0:
@@ -632,6 +640,15 @@ class Daemon:
                     with contextlib.suppress(asyncio.CancelledError):
                         await task
                 self._cleanup()
+
+
+def _bridge_file_pid(path) -> int | None:
+    """The pid named by a pairing file, or None if it names nothing we can read."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return int(payload["pid"])
+    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return None
 
 
 async def run_daemon(

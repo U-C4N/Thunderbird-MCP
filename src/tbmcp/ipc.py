@@ -115,6 +115,25 @@ class DaemonInfo:
         except FileNotFoundError:
             pass
 
+    @classmethod
+    def clear_if_owned(cls, pid: int) -> None:
+        """Withdraw the advertisement only while it still names `pid`.
+
+        A daemon that stands down because another one took the advertisement over
+        must not delete the winner's file on its way out — that leaves `serve` with
+        nothing to find and two healthy processes looking blameless.
+
+        Reads the raw file rather than `load()`: what matters here is who wrote it,
+        not whether that process is still alive or speaks our protocol version.
+        """
+        try:
+            raw = json.loads(cls.path().read_text(encoding="utf-8"))
+            owner = int(raw["pid"])
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+            return
+        if owner == pid:
+            cls.clear()
+
 
 def _restrict_permissions(path: Path) -> None:
     """Best-effort: make the token file readable only by this user."""

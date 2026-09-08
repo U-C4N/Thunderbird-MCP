@@ -26,7 +26,7 @@ from websockets.exceptions import ConnectionClosed
 from tbmcp import ipc
 from tbmcp.daemon import Daemon, run_daemon
 from tbmcp.errors import NotConnectedError
-from tbmcp.profile import ThunderbirdProfile
+from tbmcp.profile import BRIDGE_FILE, ThunderbirdProfile
 
 pytestmark = pytest.mark.anyio
 
@@ -327,3 +327,35 @@ class TestHandshakeTelemetry:
                 await daemon._invoke("messages.query", {}, timeout=1, on_progress=None)
 
         assert "never completed the handshake" in caught.value.message
+
+    def test_standing_down_leaves_the_winners_files_alone(self, isolated_state) -> None:
+        """`_cleanup` unlinked both files unconditionally, so a daemon that stood
+        down because it had been superseded deleted the *winner's* pairing file and
+        advertisement — and the add-on was left holding a token nobody listened for."""
+        daemon = _daemon(isolated_state)
+        bridge_file = isolated_state / BRIDGE_FILE
+        bridge_file.write_text(json.dumps({"port": 1, "token": "theirs", "pid": 999_001}))
+        ipc.DaemonInfo(
+            version=ipc.PROTOCOL_VERSION, port=1, token="theirs", pid=999_001, profile=""
+        ).write()
+
+        daemon._cleanup()
+
+        assert bridge_file.is_file(), "deleted the winner's pairing file"
+        assert ipc.DaemonInfo.path().is_file(), "deleted the winner's advertisement"
+
+    def test_a_daemon_still_clears_up_after_itself(self, isolated_state) -> None:
+        daemon = _daemon(isolated_state)
+        daemon._write_bridge_file(51234)
+        ipc.DaemonInfo(
+            version=ipc.PROTOCOL_VERSION,
+            port=1,
+            token="ours",
+            pid=os.getpid(),
+            profile=str(isolated_state),
+        ).write()
+
+        daemon._cleanup()
+
+        assert not (isolated_state / BRIDGE_FILE).exists()
+        assert not ipc.DaemonInfo.path().exists()
