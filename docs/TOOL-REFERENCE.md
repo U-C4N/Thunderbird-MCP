@@ -392,6 +392,13 @@ conversation id you can pass to `search_conversation`. For precise filters
 If this returns nothing unexpectedly, call `search_index_status`: the global
 indexer can be disabled or still catching up.
 
+`matched` is how many of the retrieved messages matched, and it is the
+total only when `truncated` is absent; a truncated search ranked as deep
+as it could and there may be more below. `unmatchableTerms` names words
+the index cannot look up at all — anything that breaks into pieces of
+fewer than three characters, like "2.0" — and because every term has to
+match, one of those is enough to empty the result.
+
 Parameters: **query**, limit, offset, folder_id  
 *(bold means required; `confirm` is the confirmation gate)*
 

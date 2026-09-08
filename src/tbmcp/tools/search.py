@@ -116,6 +116,13 @@ def register(reg: Registrar) -> None:
 
         If this returns nothing unexpectedly, call `search_index_status`: the global
         indexer can be disabled or still catching up.
+
+        `matched` is how many of the retrieved messages matched, and it is the
+        total only when `truncated` is absent; a truncated search ranked as deep
+        as it could and there may be more below. `unmatchableTerms` names words
+        the index cannot look up at all — anything that breaks into pieces of
+        fewer than three characters, like "2.0" — and because every term has to
+        match, one of those is enough to empty the result.
         """
         if not query or not query.strip():
             raise UsageError("query is required — pass the words to search for.")
@@ -130,12 +137,22 @@ def register(reg: Registrar) -> None:
             timeout=120.0,
         )
         hits = result.get("hits") or result.get("messages") or []
+        truncated = bool(result.get("truncated"))
+        # A null field reads to a model as a fact about the mailbox, so anything
+        # the add-on did not send is left out rather than sent as null.
+        reported = {
+            key: result[key]
+            for key in ("matched", "retrieved", "indexEnabled", "unmatchableTerms", "note")
+            if result.get(key) is not None
+        }
         return page(
             hits,
-            total=result.get("totalMatched"),
-            indexEnabled=result.get("indexEnabled"),
-            note=result.get("note"),
+            # `matched` counts what the ranking saw. Once the retrieval was cut
+            # short that is no longer a total of anything.
+            total=None if truncated else result.get("matched"),
+            truncated=truncated,
             query=query,
+            **reported,
         )
 
     @reg.read_tool(title="Read a whole conversation", meta=large_output())
@@ -160,11 +177,16 @@ def register(reg: Registrar) -> None:
         else:
             params["headerMessageId"] = header_message_id
         result = await call("x.gloda.conversation", params, timeout=120.0)
+        known = {
+            key: result[key]
+            for key in ("conversationId", "subject", "participants")
+            if result.get(key) is not None
+        }
         return page(
             result.get("messages") or [],
-            conversationId=result.get("conversationId"),
-            subject=result.get("subject"),
-            participants=result.get("participants"),
+            # The thread can be longer than the page asked for.
+            total=result.get("total"),
+            **known,
         )
 
     @reg.read_tool(title="Global index status")

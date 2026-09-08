@@ -132,12 +132,18 @@ def register(reg: Registrar) -> None:
             },
             timeout=90.0,
         )
+        # A null field reads to a model as a fact about the mailbox, so anything
+        # the add-on did not send is left out rather than sent as null. `scope`
+        # comes with a first page only; a continuation is by definition the same
+        # search.
+        reported = {
+            key: result[key] for key in ("scope", "indexNote") if result.get(key) is not None
+        }
         return page(
             [message_summary(m) for m in result.get("messages", [])],
             cursor=result.get("cursor"),
             total=result.get("totalAvailable"),
-            searchedFolders=result.get("searchedFolders"),
-            indexNote=result.get("indexNote"),
+            **reported,
         )
 
     @reg.read_tool(title="List a folder")
