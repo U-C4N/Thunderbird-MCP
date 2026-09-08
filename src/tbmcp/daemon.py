@@ -41,6 +41,26 @@ DEFAULT_IDLE_TIMEOUT = 900.0
 ProgressCb = Callable[[dict[str, Any]], Awaitable[None]]
 
 
+def error_payload(exc: BaseException) -> dict[str, Any]:
+    """Serialise a failure into the protocol's `error` object.
+
+    Deliberately reads `.message` rather than `str(exc)`. `TbmcpError.__str__` renders
+    the code and the `needs` list into the text for humans, so relaying `str(exc)`
+    appended them again on every hop: a "not connected" that crossed the add-on, the
+    daemon and the bridge reached the caller as "... [NOT_CONNECTED] [NOT_CONNECTED]".
+    Reading the field back keeps a relayed error identical to the one that was sent.
+    """
+    payload: dict[str, Any] = {
+        "kind": getattr(exc, "kind", "internal"),
+        "code": getattr(exc, "code", None),
+        "message": getattr(exc, "message", None) or str(exc),
+    }
+    needs = getattr(exc, "needs", None)
+    if needs:
+        payload["needs"] = needs
+    return payload
+
+
 @dataclass
 class _Pending:
     future: asyncio.Future[Any]
@@ -365,18 +385,10 @@ class Daemon:
                 on_progress=forward_progress if wants_progress else None,
             )
         except Exception as exc:
-            kind = getattr(exc, "kind", "internal")
-            payload: dict[str, Any] = {
-                "kind": kind,
-                "code": getattr(exc, "code", None),
-                "message": str(exc),
-            }
-            needs = getattr(exc, "needs", None)
-            if needs:
-                payload["needs"] = needs
             with contextlib.suppress(Exception):
                 await ipc.write_message(
-                    writer, {"t": "res", "id": request_id, "ok": False, "error": payload}
+                    writer,
+                    {"t": "res", "id": request_id, "ok": False, "error": error_payload(exc)},
                 )
             return
         with contextlib.suppress(Exception):
