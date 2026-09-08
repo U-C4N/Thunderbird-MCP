@@ -36,6 +36,18 @@ function systemEntry(message, at) {
   };
 }
 
+/** A plain nsIConsoleMessage: no QueryInterface to nsIScriptError, no timestamp
+ *  unless the caller says so — console.log output and XPCOM warnings look like this. */
+function plainEntry(message, at) {
+  return {
+    message,
+    timeStamp: at,
+    QueryInterface: () => {
+      throw new Error("NS_NOINTERFACE");
+    },
+  };
+}
+
 /** A ConsoleAPI event, as an extension page's `console.*` leaves it. */
 function consoleEvent({ level = "log", args, at, addonId, innerID }) {
   return { level, arguments: args, timeStamp: at, addonId, innerID };
@@ -190,6 +202,39 @@ describe("admin.consoleMessages", () => {
     assert.deepEqual(
       plain(result.messages.map((row) => row.message)),
       ["from XPCOM"]
+    );
+  });
+
+  it("keeps a plain console message in its place, and never drops it first", async () => {
+    // A plain nsIConsoleMessage carries its time on the entry itself. Sorting it
+    // as "oldest" put every such line at the front, where `limit` trims first —
+    // the newest [tbmcp] warning was the first thing to disappear.
+    const call = experiment({
+      system: [
+        systemEntry("old script error", AT),
+        plainEntry("newest plain message", AT + 5000),
+      ],
+      events: [consoleEvent({ args: ["ours, in between"], at: AT + 1000, addonId: ADDON_ID })],
+    });
+
+    const result = await call({ limit: 2 });
+
+    assert.deepEqual(
+      plain(result.messages.map((row) => row.message)),
+      ["ours, in between", "newest plain message"]
+    );
+  });
+
+  it("keeps store order for entries with no time at all", async () => {
+    const call = experiment({
+      system: [plainEntry("first, untimed"), plainEntry("second, untimed")],
+    });
+
+    const result = await call({});
+
+    assert.deepEqual(
+      plain(result.messages.map((row) => row.message)),
+      ["first, untimed", "second, untimed"]
     );
   });
 });

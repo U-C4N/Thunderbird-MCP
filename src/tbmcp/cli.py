@@ -403,15 +403,15 @@ def _print_doctor(report: dict) -> None:
 
     if not bridge.get("connected"):
         print("\nNot connected. In order, check:")
+        # A stale add-on is worth saying whatever else is wrong — including when
+        # Thunderbird is closed, or the user starts it and is back here in a minute.
+        if versions.get("mismatch"):
+            seen = versions.get("live") or versions.get("installed")
+            print(f"  * The installed add-on is {seen}, source is {versions.get('source')}.")
+            print("    Run `tbmcp install-addon` and restart Thunderbird.")
         if not addon.get("thunderbirdRunning"):
             print("  * Thunderbird is not running — start it.")
         else:
-            # A stale add-on is worth saying whatever else is wrong: it is often the
-            # cause, and every remedy below assumes the two halves match.
-            if versions.get("mismatch"):
-                seen = versions.get("live") or versions.get("installed")
-                print(f"  * The installed add-on is {seen}, source is {versions.get('source')}.")
-                print("    Run `tbmcp install-addon` and restart Thunderbird.")
             failures = describe_handshake(bridge.get("handshake"))
             if failures:
                 # It has dialled in, repeatedly. Anything below would be a guess that

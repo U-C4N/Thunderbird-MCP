@@ -417,3 +417,21 @@ def test_the_daemon_log_is_named_because_nothing_else_shows_it(monkeypatch, tmp_
     assert "daemon.log" in out
     assert "add-on handshakes" in out
     assert "none since the daemon started" in out
+
+
+@pytest.mark.usefixtures("_clean_tbmcp_env")
+def test_a_stale_addon_is_named_even_while_thunderbird_is_closed(monkeypatch, tmp_path, capsys):
+    """The remedy used to hide behind "Thunderbird is not running": a user with a stale
+    add-on and a closed client was told only to start it, and came straight back."""
+    _run_doctor(
+        monkeypatch,
+        [],
+        bridge_status={"connected": False},
+        addon_summary={"addonVersion": "1.3.0", "thunderbirdRunning": False},
+        profile=_profile(tmp_path, {**_ADDON_STATUS, "addonVersion": "1.2.0"}),
+    )
+
+    out = capsys.readouterr().out
+    assert "Thunderbird is not running" in out
+    assert "installed add-on is 1.2.0, source is 1.3.0" in out
+    assert "tbmcp install-addon" in out

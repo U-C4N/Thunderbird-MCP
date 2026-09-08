@@ -258,7 +258,9 @@ def install_automatic(
     # client closed. That happened: the add-on was installed and attached, the
     # install script's reply was lost, and Thunderbird stayed down.
     try:
-        return _install_over_marionette(exe, profile, package, identifier)
+        return _install_over_marionette(
+            exe, profile, package, identifier, restart_after=restart_after
+        )
     finally:
         _restart_plain(exe, profile, restart_after)
 
@@ -268,6 +270,8 @@ def _install_over_marionette(
     profile: ThunderbirdProfile | None,
     package: pathlib.Path,
     identifier: str,
+    *,
+    restart_after: bool,
 ) -> InstallOutcome:
     """Drive the install through Marionette; the caller owns the restart."""
     if not marionette.wait_for_port(timeout=90.0):
@@ -284,7 +288,7 @@ def _install_over_marionette(
         if not isinstance(report, dict):
             # A lost reply is not a failed install: the script may well have run to
             # completion. Ask the AddonManager before deciding.
-            report = _report_from_status(client, identifier, report)
+            report = _report_from_status(client, identifier, report, restarting=restart_after)
     finally:
         # Always take Marionette back down: while it is listening, any local process
         # can run privileged code inside Thunderbird.
@@ -307,7 +311,9 @@ def _install_over_marionette(
     )
 
 
-def _report_from_status(client: marionette.Marionette, identifier: str, raw: object) -> dict:
+def _report_from_status(
+    client: marionette.Marionette, identifier: str, raw: object, *, restarting: bool
+) -> dict:
     """Rebuild an install report from the AddonManager when the script's reply was lost."""
     expected = addon_version()
     status = client.execute(STATUS_SCRIPT, [identifier], timeout_ms=20_000)
@@ -328,7 +334,12 @@ def _report_from_status(client: marionette.Marionette, identifier: str, raw: obj
     raise TbmcpError(
         f"unexpected response from Thunderbird: {raw!r}, and the AddonManager does not "
         f"report {identifier} {expected} as installed and active ({status!r}). "
-        "Thunderbird has been restarted; try again, or use `tbmcp install-addon --manual`.",
+        + (
+            "Thunderbird is being restarted; "
+            if restarting
+            else "Thunderbird was left stopped (--no-restart); "
+        )
+        + "try again, or use `tbmcp install-addon --manual`.",
         code="INSTALL_UNVERIFIED",
     )
 

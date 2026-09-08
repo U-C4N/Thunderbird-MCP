@@ -446,8 +446,16 @@ TBX_MODULE_NAMES.push("admin");
       }
     } catch (ex) {
       // A plain nsIConsoleMessage — console.log output and XPCOM warnings — carries
-      // no location, so the text is all there is.
+      // no location, but it does carry its time, and without it the merge below
+      // would file every such line as "oldest" and trim it first.
       record.severity = "message";
+      try {
+        if (entry.timeStamp) {
+          record.at = new Date(entry.timeStamp).toISOString();
+        }
+      } catch (timeError) {
+        // No time at all: the store's own order is the best we have.
+      }
     }
     return record;
   }
@@ -512,18 +520,26 @@ TBX_MODULE_NAMES.push("admin");
     return records;
   }
 
-  /** Records from both stores in time order, newest last. Entries without a
-   *  timestamp keep their store's own order and sort as oldest. */
+  /** Records from both stores in time order, newest last.
+   *
+   *  An entry with no time keeps its position relative to its neighbours by
+   *  borrowing the time of the previous entry in its own store — the store is
+   *  already chronological, so that is where it belongs, and it can never be
+   *  pushed to the front where `limit` would trim it away. */
   function mergedConsole(entries) {
-    const stamped = (record, index) => ({
-      record,
-      index,
-      time: record.at ? Date.parse(record.at) : 0,
-    });
-    const rows = entries
-      .map(describeConsoleEntry)
-      .map(stamped)
-      .concat(ownConsoleEvents().map((record, index) => stamped(record, entries.length + index)));
+    const stamped = (records, offset) => {
+      let last = 0;
+      return records.map((record, index) => {
+        const parsed = record.at ? Date.parse(record.at) : NaN;
+        if (Number.isFinite(parsed)) {
+          last = parsed;
+        }
+        return { record, index: offset + index, time: last };
+      });
+    };
+    const rows = stamped(entries.map(describeConsoleEntry), 0).concat(
+      stamped(ownConsoleEvents(), entries.length)
+    );
     rows.sort((a, b) => a.time - b.time || a.index - b.index);
     return rows.map((row) => row.record);
   }

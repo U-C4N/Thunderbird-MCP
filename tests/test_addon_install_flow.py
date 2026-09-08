@@ -137,3 +137,20 @@ def test_a_normal_success_restarts_once(flow):
 
     assert outcome.ok
     assert calls["restart"] == 1
+
+
+def test_the_failure_text_does_not_claim_a_restart_that_no_restart_prevented(flow):
+    client = FakeClient(
+        install_report=None,
+        status_report={"installed": True, "version": "1.0.0", "isActive": False},
+    )
+    calls = flow(client)
+
+    with pytest.raises(TbmcpError) as caught:
+        addon_install.install_automatic(restart_after=False)
+
+    text = str(caught.value)
+    assert "left stopped" in text
+    assert "is being restarted" not in text
+    # The restart hook is still invoked — it is the hook that honours the flag.
+    assert calls["restart"] == 1
