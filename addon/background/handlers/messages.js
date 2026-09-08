@@ -83,14 +83,28 @@
 
   // --------------------------------------------------------------------- query
 
+  /**
+   * Run a query and return its first page.
+   *
+   * Never ask for `returnMessageListId`: that flag makes Thunderbird answer with
+   * the list id itself, a bare string with no messages on it, which is how every
+   * search used to come back empty. A build that answers with one anyway is one
+   * `continueList` away from the page we wanted.
+   */
+  async function startQuery(query) {
+    const first = await browser.messages.query(query);
+    return typeof first === "string" ? browser.messages.continueList(first) : first;
+  }
+
   tbxRegistry.define("messages.query", async (params) => {
     const limit = params.limit || DEFAULT_LIMIT;
     const query = Object.assign({}, params.query || {});
-    // Ask Thunderbird for a resumable list rather than one giant array.
-    query.returnMessageListId = true;
-    query.messagesPerPage = Math.min(Math.max(limit, 10), 100);
+    // Any positive page size is legal; asking for exactly what the caller wants
+    // keeps the common case to one round trip. Thunderbird may still cut a page
+    // short (autoPaginationTimeout), so the walk below loops regardless.
+    query.messagesPerPage = limit;
 
-    const list = await resumeOrStart(params.cursor, () => browser.messages.query(query));
+    const list = await resumeOrStart(params.cursor, () => startQuery(query));
     const paged = await takePage(list, limit);
     const result = { messages: paged.messages, cursor: paged.cursor };
     if (query.fullText && browser.tbx) {
