@@ -25,6 +25,17 @@ var tbxTransport = (() => {
   /** How often to re-check that we are still attached to the advertised daemon. */
   const SUPERVISE_MS = 10000;
 
+  /* An open socket that never gets its `welcome` is the worst state to be in: it
+   * looks connected from here, answers nothing, and used to sit there until the
+   * daemon's own timeout dropped it — silently, on repeat, for as long as
+   * Thunderbird stayed up. Give up on it ourselves, and say so. */
+  const HELLO_TIMEOUT_MS = 8000;
+
+  /* And the same for the step before it. A socket that reaches TCP but never
+   * completes the HTTP upgrade stays CONNECTING forever as far as Gecko is
+   * concerned — no error event, no close — so nothing else would ever free it. */
+  const CONNECT_TIMEOUT_MS = 15000;
+
   let socket = null;
   let attempt = 0;
   let waits = 0;
@@ -38,13 +49,21 @@ var tbxTransport = (() => {
    * privileged half, and one that never answers used to leave the socket open and
    * silent until the daemon gave up on it. */
   let identity = { app: null, capabilities: null };
+  let helloTimer = null;
+  let connectTimer = null;
+  let welcomed = false; // has the live socket completed its handshake?
   const inFlight = new Map(); // request id -> AbortController-ish flag
 
   function state() {
     if (!socket) {
       return "disconnected";
     }
-    return socket.readyState === WebSocket.OPEN ? "connected" : "connecting";
+    if (socket.readyState !== WebSocket.OPEN) {
+      return "connecting";
+    }
+    // Open but unanswered is its own state, and the one worth reporting: it is
+    // what a wedged handshake looks like from in here.
+    return welcomed ? "connected" : "handshaking";
   }
 
   async function readPairing() {
@@ -156,6 +175,8 @@ var tbxTransport = (() => {
         break;
       case "welcome":
         tbxLog.info("bridge established");
+        clearTimeout(helloTimer);
+        welcomed = true;
         attempt = 0;
         waits = 0;
         rejections = 0;
@@ -233,7 +254,26 @@ var tbxTransport = (() => {
       return;
     }
 
-    socket.onopen = () => {
+    // Handlers bind to this socket rather than to whatever `socket` holds when they
+    // fire, so a late event from a superseded socket cannot disturb the live one.
+    const ws = socket;
+    welcomed = false;
+
+    clearTimeout(connectTimer);
+    connectTimer = setTimeout(() => {
+      if (ws.readyState !== WebSocket.CONNECTING) {
+        return;
+      }
+      tbxLog.error(
+        `no WebSocket handshake with the daemon on port ${pairing.port} within ` +
+          `${CONNECT_TIMEOUT_MS}ms — closing the socket; \`tbmcp doctor\` shows the ` +
+          "daemon's view"
+      );
+      ws.close(4000, "connect timeout");
+    }, CONNECT_TIMEOUT_MS);
+
+    ws.onopen = () => {
+      clearTimeout(connectTimer);
       send({
         t: "hello",
         token: pairing.token,
@@ -242,13 +282,23 @@ var tbxTransport = (() => {
         app: identity.app || tbxCapabilities.appInfoSync(),
         capabilities: identity.capabilities || tbxCapabilities.describeSync(),
       });
+      clearTimeout(helloTimer);
+      helloTimer = setTimeout(() => {
+        tbxLog.error(
+          `no welcome from the daemon within ${HELLO_TIMEOUT_MS}ms after hello — closing ` +
+            "the socket; `tbmcp doctor` shows the daemon's view"
+        );
+        ws.close(4000, "no welcome");
+      }, HELLO_TIMEOUT_MS);
     };
-    socket.onmessage = onMessage;
-    socket.onerror = () => {
+    ws.onmessage = onMessage;
+    ws.onerror = () => {
       // onclose always follows; retry is scheduled there.
       tbxLog.debug("socket error");
     };
-    socket.onclose = (event) => {
+    ws.onclose = (event) => {
+      clearTimeout(helloTimer);
+      clearTimeout(connectTimer);
       socket = null;
       currentPort = null;
       for (const ctx of inFlight.values()) {
@@ -289,7 +339,9 @@ var tbxTransport = (() => {
             "`tbmcp install-addon`."
         );
       }
-      scheduleRetry(`closed ${code}`, code === 4002 ? "failed" : "waiting");
+      // 4000 is ours: a watchdog gave up on this socket. Whatever is on that port
+      // is not talking to us, so back off rather than poll.
+      scheduleRetry(`closed ${code}`, code === 4002 || code === 4000 ? "failed" : "waiting");
     };
   }
 
@@ -352,6 +404,8 @@ var tbxTransport = (() => {
     stop() {
       stopped = true;
       clearTimeout(retryTimer);
+      clearTimeout(helloTimer);
+      clearTimeout(connectTimer);
       clearInterval(supervisor);
       supervisor = null;
       if (socket) {

@@ -189,6 +189,64 @@ describe("capability snapshots", () => {
   });
 });
 
+describe("handshake watchdog", () => {
+  it("closes a socket that never gets its welcome", async () => {
+    const world = makeWorld();
+    const ws = await world.start();
+
+    ws.open();
+    assert.equal(world.transport.status().state, "handshaking");
+    await world.clock.advance(8000);
+
+    assert.deepEqual(ws.closeCalls, [{ code: 4000, reason: "no welcome" }]);
+    // A daemon that accepts and then ignores us is a failure, not a wait.
+    assert.equal(world.transport.status().attempt, 1);
+    assert.deepEqual(world.errors(), [
+      "no welcome from the daemon within 8000ms after hello — closing the socket; " +
+        "`tbmcp doctor` shows the daemon's view",
+    ]);
+  });
+
+  it("leaves a welcomed socket alone", async () => {
+    const world = makeWorld();
+    const ws = await world.start();
+
+    ws.open();
+    ws.receive({ t: "welcome" });
+    await world.clock.advance(8000);
+
+    assert.deepEqual(ws.closeCalls, []);
+    assert.deepEqual(world.errors(), []);
+    assert.equal(world.transport.status().state, "connected");
+  });
+});
+
+describe("connect watchdog", () => {
+  it("closes a socket that never finishes connecting", async () => {
+    const world = makeWorld();
+    const ws = await world.start();
+
+    await world.clock.advance(15000);
+
+    assert.deepEqual(ws.closeCalls, [{ code: 4000, reason: "connect timeout" }]);
+    assert.equal(world.errors().length, 1);
+    assert.match(world.errors()[0], /port 4711/);
+    assert.equal(world.transport.status().attempt, 1);
+  });
+
+  it("leaves a socket that opened in time alone", async () => {
+    const world = makeWorld();
+    const ws = await world.start();
+
+    ws.open();
+    ws.receive({ t: "welcome" });
+    await world.clock.advance(15000);
+
+    assert.deepEqual(ws.closeCalls, []);
+    assert.deepEqual(world.errors(), []);
+  });
+});
+
 describe("startup wiring", () => {
   /** Run main.js as Thunderbird would, against a transport that only records. */
   async function bootMain() {
