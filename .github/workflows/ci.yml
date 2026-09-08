@@ -19,7 +19,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [windows-latest, ubuntu-latest, macos-latest]
-        python: ["3.11", "3.13"]
+        python: ["3.11", "3.13", "3.14"]
 
     steps:
       - uses: actions/checkout@v4
@@ -44,6 +44,12 @@ jobs:
       - name: Tests
         run: uv run pytest -q
 
+      - name: Add-on unit tests (node)
+        # The add-on's background and privileged scripts run under node's vm with
+        # fakes for the WebExtension and XPCOM surfaces (tests/js/README.md). Quote
+        # the glob: `node --test <dir>` does not expand on the Windows runner.
+        run: node --test "tests/js/*.test.mjs"
+
       - name: Cross-layer consistency
         # Compares the Python tools, the add-on handlers and the privileged forwarding
         # list, and validates every add-on script. Node is preinstalled on both
@@ -65,7 +71,7 @@ jobs:
         run: uv run python -m tbmcp tools --toolsets all
 
       - uses: actions/upload-artifact@v4
-        if: matrix.os == 'windows-latest' && matrix.python == '3.13'
+        if: matrix.os == 'windows-latest' && matrix.python == '3.14'
         with:
           name: thunderbird-mcp-addon
           path: build/*.xpi
