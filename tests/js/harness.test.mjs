@@ -13,7 +13,9 @@ import {
   fakeClock,
   fakeLog,
   fakeMessages,
+  fakeSandbox,
   fakeWebSocketClass,
+  loadExperiment,
   loadScript,
 } from "./harness.mjs";
 
@@ -188,5 +190,55 @@ describe("fakeMessages", () => {
       messages.calls.map((call) => call.method),
       ["list", "abortList", "continueList"]
     );
+  });
+});
+
+describe("fakeSandbox", () => {
+  it("injects what the ext-*.js sandbox injects, and no DOM timers", () => {
+    const globals = fakeSandbox();
+
+    assert.equal(globals.setTimeout, undefined, "the privileged sandbox has no DOM timers");
+    const timer = globals.ChromeUtils.importESModule("resource://gre/modules/Timer.sys.mjs");
+    assert.equal(typeof timer.setTimeout, "function");
+    assert.equal(
+      globals.ChromeUtils.importESModule("resource://gre/modules/Timer.sys.mjs"),
+      timer,
+      "one URL answers with one object, so a test can watch what the code did to it"
+    );
+    assert.deepEqual(
+      { ...globals.ChromeUtils.importESModule("resource://gre/modules/Unheard.sys.mjs") },
+      {},
+      "an unknown module imports as empty rather than throwing"
+    );
+  });
+
+  it("lets a test replace one module's exports", () => {
+    const globals = fakeSandbox({
+      modules: { "resource:///modules/MailServices.sys.mjs": { MailServices: { accounts: 7 } } },
+    });
+
+    const services = globals.ChromeUtils.importESModule("resource:///modules/MailServices.sys.mjs");
+    assert.equal(services.MailServices.accounts, 7);
+  });
+});
+
+describe("loadExperiment", () => {
+  it("splices the named modules into core.js and exposes the API class", async () => {
+    const ctx = loadExperiment(fakeSandbox(), { modules: ["gloda"] });
+
+    const api = new ctx.tbx().getAPI({ extension: {} }).tbx;
+    const report = await api.availableModules();
+
+    assert.deepEqual([...report.loaded], ["gloda"], "the module announced itself");
+    assert.ok(report.methods.includes("gloda.search"), "its handlers reached the dispatch table");
+  });
+
+  it("leaves core.js alone when no module is named", async () => {
+    const ctx = loadExperiment(fakeSandbox(), { modules: [] });
+
+    const report = await new ctx.tbx().getAPI({ extension: {} }).tbx.availableModules();
+
+    assert.deepEqual([...report.loaded], []);
+    assert.deepEqual([...report.methods], []);
   });
 });

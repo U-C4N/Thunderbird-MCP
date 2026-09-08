@@ -320,3 +320,189 @@ export function fakeMessages({ folders = {}, pageSize = 10, queryPageSize = 100 
     },
   };
 }
+
+/* --------------------------------------------------------- the privileged half */
+
+/** Must match `src/tbmcp/addon_build.py::MODULE_MARKER`; the splice below is that
+ *  build step, reproduced so a test runs what ships. */
+const MODULE_MARKER = "/* ===TBX_MODULES=== (build_xpi.py splices experiment/modules/*.js here) */";
+
+/** The GlodaMsgSearcher URL, which more than one caller here needs to name. */
+const GLODA_SEARCHER_URL = "resource:///modules/gloda/GlodaMsgSearcher.sys.mjs";
+
+/**
+ * A gloda full-text searcher over a fixed corpus.
+ *
+ * Gloda is callback-driven: a query hands its collection listener the rows it
+ * found, then says it is done. `limit(n)` is the only knob the add-on turns, and
+ * the number of rows that come back for a given `n` is exactly what tells
+ * `gloda.search` whether the corpus was deeper than it looked — so the fake
+ * honours it to the row.
+ *
+ * @param {object[]} corpus  synthetic gloda messages, in relevance order.
+ * @param {number[]} scores  per-row scores; defaults to descending integers.
+ */
+export function fakeGlodaSearcherClass({ corpus = [], scores = null } = {}) {
+  return class FakeGlodaMsgSearcher {
+    constructor(listener, query, matchAll) {
+      this.listener = listener;
+      this.fulltextTerms = String(query || "")
+        .split(/\s+/)
+        .filter(Boolean);
+      this.matchAll = matchAll;
+      this.scores = scores || corpus.map((_message, index) => corpus.length - index);
+      this.collection = null;
+      this.query = null;
+    }
+
+    buildFulltextQuery() {
+      const searcher = this;
+      return {
+        limit(n) {
+          this.n = n;
+        },
+        getCollection(collectionListener) {
+          const rows = corpus.slice(0, this.n === undefined ? corpus.length : this.n);
+          searcher.retrieved = rows.length;
+          collectionListener.onItemsAdded(rows);
+          collectionListener.onQueryCompleted();
+          return { items: rows };
+        },
+      };
+    }
+  };
+}
+
+/**
+ * The globals Thunderbird pre-injects into the ext-*.js sandbox, faked.
+ *
+ * Deliberately missing: `setTimeout` and every other DOM global. The privileged
+ * half runs in a plain system-principal sandbox with none of them, and code that
+ * reaches for one has to fail here the way it fails in Thunderbird.
+ *
+ * @param {object} modules  resource URL -> its exports, merged over the defaults;
+ *   an unnamed URL imports as `{}`. One URL always answers with one object, so a
+ *   test can inspect what the code under test did to it.
+ * @param {object} prefs  preference name -> value, for `Services.prefs`.
+ */
+export function fakeSandbox({ modules = {}, prefs = {} } = {}) {
+  const timer = {
+    armed: [],
+    cleared: [],
+    setTimeout(fn, ms, ...args) {
+      const id = setTimeout(fn, ms, ...args);
+      timer.armed.push(id);
+      return id;
+    },
+    clearTimeout(id) {
+      timer.cleared.push(id);
+      clearTimeout(id);
+    },
+  };
+
+  const records = [];
+  const record =
+    (level) =>
+    (...args) =>
+      records.push({ level, text: args.map(String).join(" ") });
+
+  const known = {
+    "resource://gre/modules/Timer.sys.mjs": timer,
+    "resource://gre/modules/ExtensionUtils.sys.mjs": {
+      ExtensionError: class ExtensionError extends Error {},
+    },
+    "resource:///modules/MailServices.sys.mjs": {
+      MailServices: { accounts: { accounts: [], allIdentities: [] } },
+    },
+    [GLODA_SEARCHER_URL]: { GlodaMsgSearcher: fakeGlodaSearcherClass() },
+    ...modules,
+  };
+  const unknown = new Map();
+
+  return {
+    ChromeUtils: {
+      importESModule(url) {
+        if (known[url]) {
+          return known[url];
+        }
+        if (!unknown.has(url)) {
+          unknown.set(url, {});
+        }
+        return unknown.get(url);
+      },
+    },
+    Services: {
+      prefs: {
+        getBoolPref: (name, fallback = false) =>
+          name in prefs ? Boolean(prefs[name]) : fallback,
+        getIntPref: (name, fallback = 0) => (name in prefs ? Number(prefs[name]) : fallback),
+      },
+      appinfo: {
+        name: "Thunderbird",
+        version: "155.0",
+        appBuildID: "20260101000000",
+        platformVersion: "155.0",
+        OS: "WINNT",
+      },
+      dirsvc: { get: (key) => ({ path: `/fake/${key}` }) },
+      locale: { appLocaleAsBCP47: "en-US" },
+    },
+    Cc: {},
+    Ci: {},
+    Cu: {},
+    Cr: {},
+    IOUtils: {
+      exists: async () => false,
+      readJSON: async () => null,
+      writeJSON: async () => {},
+      write: async () => {},
+    },
+    PathUtils: { join: (...parts) => parts.join("/") },
+    ExtensionAPI: class ExtensionAPI {},
+    console: {
+      records,
+      debug: record("debug"),
+      info: record("info"),
+      log: record("log"),
+      warn: record("warn"),
+      error: record("error"),
+    },
+    // Block-scoped helpers publish themselves here; in Thunderbird it is undefined
+    // and the publishing statement does nothing.
+    TBX_TEST_HOOKS: {},
+  };
+}
+
+/**
+ * Evaluate the privileged half — core.js with `modules` spliced in — in one context.
+ *
+ * The splice is the build step, not a convenience: core.js's `H`, `mod`,
+ * `TBX_MODULES` and `MODULE_URLS` are top-level `const`s, so a module loaded as a
+ * separate script would not see any of them. `this.tbx = class …` at the top level
+ * of core.js puts the API class on the context.
+ *
+ * @param {object} globals  usually `fakeSandbox()`, possibly with overrides.
+ * @param {string[]} modules  base names under `addon/experiment/modules/`.
+ * @returns {object} the context, with the API class at `ctx.tbx`.
+ */
+export function loadExperiment(globals = {}, { modules = [] } = {}) {
+  const experiment = path.join(ROOT, "addon", "experiment");
+  const core = fs.readFileSync(path.join(experiment, "core.js"), "utf8");
+  if (!core.includes(MODULE_MARKER)) {
+    throw new Error("experiment/core.js has no ===TBX_MODULES=== marker");
+  }
+  const chunks = modules.map((name) => {
+    const body = fs.readFileSync(path.join(experiment, "modules", `${name}.js`), "utf8");
+    return (
+      "/* ---------------------------------------------------------------\n" +
+      ` * experiment/modules/${name}.js\n` +
+      " * --------------------------------------------------------------- */\n" +
+      `${body.trimEnd()}\n`
+    );
+  });
+  const context = vm.createContext({ ...globals });
+  vm.runInContext(core.replace(MODULE_MARKER, chunks.join("\n")), context, {
+    filename: "experiment/implementation.js",
+  });
+  return context;
+}
