@@ -56,6 +56,7 @@ const MODULE_URLS = {
   AddonManager: "resource://gre/modules/AddonManager.sys.mjs",
   NetUtil: "resource://gre/modules/NetUtil.sys.mjs",
   FileUtils: "resource://gre/modules/FileUtils.sys.mjs",
+  ExtensionUtils: "resource://gre/modules/ExtensionUtils.sys.mjs",
 };
 
 const _moduleCache = new Map();
@@ -241,6 +242,40 @@ const H = {
     return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
   },
 };
+
+/* ---------------------------------------------------------- errors on the wire */
+
+/** Marks a message as carrying our envelope; background/registry.js unpacks it. */
+const TBX_ERROR_TAG = "tbxerr:";
+
+/**
+ * Re-mint a failure as something that survives the hop to the background page.
+ *
+ * `ExtensionCommon.normalizeError` keeps a message only for a plain object, an
+ * `ExtensionError`, or an error whose principal the extension subsumes. Ours is
+ * none of those — a plain `Error` minted with the system principal — so the
+ * background page was handed "An unexpected error occurred" and the whole
+ * taxonomy was lost. Serialise it into the one field that does get through.
+ */
+function wireError(ex) {
+  const payload = {
+    kind: (ex && ex.tbxKind) || "thunderbird",
+    message: String((ex && ex.message) || ex),
+    // A bare "Error" name says nothing; a subclass or an explicit code does.
+    code: (ex && ex.code) || (ex && ex.name && ex.name !== "Error" ? ex.name : null),
+  };
+  if (ex && ex.needs !== undefined && ex.needs !== null) {
+    payload.needs = [].concat(ex.needs);
+  }
+  const message = TBX_ERROR_TAG + JSON.stringify(payload);
+  const utils = mod("ExtensionUtils");
+  if (utils && utils.ExtensionError) {
+    return new utils.ExtensionError(message);
+  }
+  // The other shape normalizeError trusts. Worth keeping: without ExtensionError
+  // every privileged failure would go back to being unreadable.
+  return { message };
+}
 
 /* --------------------------------------------------------------- dispatch table */
 
@@ -472,12 +507,17 @@ this.tbx = class extends ExtensionAPI {
          * `browser.tbx.invoke("prefs.get", params)`.
          */
         async invoke(method, params) {
-          const handler = TBX_MODULES[method];
-          if (!handler) {
-            const known = Object.keys(TBX_MODULES).sort().join(", ");
-            throw H.usage(`unknown privileged method ${method} (known: ${known})`);
+          try {
+            const handler = TBX_MODULES[method];
+            if (!handler) {
+              const known = Object.keys(TBX_MODULES).sort().join(", ");
+              throw H.usage(`unknown privileged method ${method} (known: ${known})`);
+            }
+            // Awaited, not returned: a rejection has to reach the catch below.
+            return await handler(params || {});
+          } catch (ex) {
+            throw wireError(ex);
           }
-          return handler(params || {});
         },
       },
     };
@@ -489,5 +529,5 @@ this.tbx = class extends ExtensionAPI {
  * `TBX_TEST_HOOKS` does not exist in Thunderbird, so this statement is a no-op
  * there — which is the point: no test-only branch ships inside a handler. */
 if (typeof TBX_TEST_HOOKS !== "undefined") {
-  TBX_TEST_HOOKS.core = { H, mod, needMod };
+  TBX_TEST_HOOKS.core = { H, mod, needMod, wireError, handlers: TBX_MODULES };
 }

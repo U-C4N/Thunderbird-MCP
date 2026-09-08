@@ -139,3 +139,15 @@ def test_a_module_that_does_not_announce_itself_is_rejected(tmp_path) -> None:
     )
     with pytest.raises(ValueError, match="TBX_MODULE_NAMES"):
         assemble_implementation(source)
+
+
+def test_the_globals_the_sandbox_lacks_are_imported(built) -> None:
+    """Two things the privileged half needs and the ext-*.js sandbox does not inject.
+
+    A bare `setTimeout` is a ReferenceError there, which surfaces only as a
+    capability that never answers; and without `ExtensionError` every failure
+    reaches the background page as "An unexpected error occurred".
+    """
+    _, _, implementation = built
+    assert "resource://gre/modules/Timer.sys.mjs" in implementation
+    assert "resource://gre/modules/ExtensionUtils.sys.mjs" in implementation
