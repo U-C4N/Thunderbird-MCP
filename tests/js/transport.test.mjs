@@ -247,6 +247,95 @@ describe("connect watchdog", () => {
   });
 });
 
+describe("re-entrancy", () => {
+  it("does not open a second socket while a connect is still reading the pairing", async () => {
+    let release;
+    const reading = new Promise((resolve) => (release = resolve));
+    const world = makeWorld({ pairing: () => reading });
+
+    world.transport.start({ app: null, capabilities: null });
+    await world.clock.advance(10000); // the supervisor ticks while the read hangs
+    assert.deepEqual(world.WebSocket.instances, []);
+
+    release(PAIRING);
+    await world.clock.advance(0);
+
+    assert.equal(world.WebSocket.instances.length, 1);
+  });
+
+  it("ignores a close from a socket it has already replaced", async () => {
+    const world = makeWorld();
+    const first = await world.start();
+    first.open();
+    first.receive({ t: "welcome" });
+    first.serverClose(1006, "daemon exited");
+    await world.clock.advance(600);
+    const second = world.WebSocket.instances[1];
+    second.open();
+    second.receive({ t: "welcome" });
+
+    first.serverClose(1006, "late notice");
+
+    assert.equal(world.transport.status().state, "connected");
+    await world.clock.advance(5000);
+    assert.equal(world.WebSocket.instances.length, 2);
+  });
+});
+
+describe("retry schedule", () => {
+  /** Advance to just before `delay`, then over it, counting sockets either side. */
+  async function expectRetryAfter(world, delay) {
+    const before = world.WebSocket.instances.length;
+    await world.clock.advance(delay - 1);
+    assert.equal(world.WebSocket.instances.length, before, `retried before ${delay}ms`);
+    await world.clock.advance(1);
+    assert.equal(world.WebSocket.instances.length, before + 1, `no retry at ${delay}ms`);
+  }
+
+  it("backs off while the same daemon keeps failing the handshake", async () => {
+    const world = makeWorld();
+    await world.start();
+
+    for (const delay of [500, 1000, 2000]) {
+      world.WebSocket.instances.at(-1).serverClose(1006, "closed by the daemon");
+      await expectRetryAfter(world, delay);
+    }
+
+    assert.equal(world.transport.status().attempt, 3);
+  });
+
+  it("polls instead of backing off when a daemon that was working goes away", async () => {
+    const world = makeWorld();
+    const ws = await world.start();
+    ws.open();
+    ws.receive({ t: "welcome" });
+
+    ws.serverClose(1006, "daemon exited");
+    await expectRetryAfter(world, 500);
+
+    // The daemon leaving is not this end failing, so nothing is backing off yet.
+    assert.equal(world.transport.status().attempt, 0);
+  });
+
+  it("starts the schedule over when a different daemon advertises itself", async () => {
+    let advertised = { version: 1, port: 4711, token: "old" };
+    const world = makeWorld({ pairing: () => advertised });
+    await world.start();
+    for (const delay of [500, 1000, 2000]) {
+      world.WebSocket.instances.at(-1).serverClose(1006, "closed by the daemon");
+      await expectRetryAfter(world, delay);
+    }
+
+    advertised = { version: 1, port: 4712, token: "new" };
+    world.WebSocket.instances.at(-1).serverClose(1006, "closed by the daemon");
+    await expectRetryAfter(world, 4000);
+
+    assert.equal(world.WebSocket.instances.at(-1).url, "ws://127.0.0.1:4712/tbmcp");
+    world.WebSocket.instances.at(-1).serverClose(1006, "closed by the daemon");
+    await expectRetryAfter(world, 500);
+  });
+});
+
 describe("startup wiring", () => {
   /** Run main.js as Thunderbird would, against a transport that only records. */
   async function bootMain() {

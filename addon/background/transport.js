@@ -52,6 +52,8 @@ var tbxTransport = (() => {
   let helloTimer = null;
   let connectTimer = null;
   let welcomed = false; // has the live socket completed its handshake?
+  let connecting = false; // a connect() is between reading the pairing and its socket
+  let lastPairing = null; // {port, token} of the daemon the schedules apply to
   const inFlight = new Map(); // request id -> AbortController-ish flag
 
   function state() {
@@ -222,10 +224,27 @@ var tbxTransport = (() => {
     retryTimer = setTimeout(connect, delay);
   }
 
+  /**
+   * One attempt at a time.
+   *
+   * `attemptConnection` awaits the pairing read before it has a socket to show for
+   * itself, and both the supervisor and the retry timer can call in during that
+   * window — which is how two sockets to the same daemon came about, one of them
+   * invisible to everything that inspects `socket`.
+   */
   async function connect() {
-    if (stopped || (socket && socket.readyState <= WebSocket.OPEN)) {
+    if (stopped || connecting || (socket && socket.readyState <= WebSocket.OPEN)) {
       return;
     }
+    connecting = true;
+    try {
+      await attemptConnection();
+    } finally {
+      connecting = false;
+    }
+  }
+
+  async function attemptConnection() {
     let pairing;
     try {
       pairing = await readPairing();
@@ -236,11 +255,22 @@ var tbxTransport = (() => {
       return;
     }
 
-    // The pairing file exists, so we are no longer waiting for a daemon to appear.
-    // Resetting here matters: after a long stretch with no daemon the wait counter
-    // sits at its ceiling, and a freshly written pairing file would otherwise not be
-    // acted on for seconds.
-    waits = 0;
+    // A daemon we have not tried before gets both schedules back at zero: after a
+    // long stretch with no daemon the counters sit at their ceiling, and a freshly
+    // written pairing file would otherwise not be acted on for half a minute.
+    //
+    // The same file we have been failing against does not get that: it is the one
+    // that used to leave us reconnecting every half second for as long as
+    // Thunderbird stayed up.
+    if (
+      !lastPairing ||
+      lastPairing.port !== pairing.port ||
+      lastPairing.token !== pairing.token
+    ) {
+      waits = 0;
+      attempt = 0;
+    }
+    lastPairing = { port: pairing.port, token: pairing.token };
 
     const url = `ws://127.0.0.1:${pairing.port}/tbmcp`;
     tbxLog.debug(`connecting to ${url}`);
@@ -297,8 +327,15 @@ var tbxTransport = (() => {
       tbxLog.debug("socket error");
     };
     ws.onclose = (event) => {
+      if (socket !== ws) {
+        // A socket we have already moved on from. Acting on this would null the
+        // live one and leave nothing to notice.
+        return;
+      }
       clearTimeout(helloTimer);
       clearTimeout(connectTimer);
+      const hadWelcome = welcomed;
+      welcomed = false;
       socket = null;
       currentPort = null;
       for (const ctx of inFlight.values()) {
@@ -339,9 +376,10 @@ var tbxTransport = (() => {
             "`tbmcp install-addon`."
         );
       }
-      // 4000 is ours: a watchdog gave up on this socket. Whatever is on that port
-      // is not talking to us, so back off rather than poll.
-      scheduleRetry(`closed ${code}`, code === 4002 || code === 4000 ? "failed" : "waiting");
+      // Which schedule applies is decided by how far this socket got, not by the
+      // code: a socket that never reached `welcome` means the daemon is there and
+      // not talking to us, and polling that every half second helps nobody.
+      scheduleRetry(`closed ${code}`, hadWelcome ? "waiting" : "failed");
     };
   }
 
