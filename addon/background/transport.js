@@ -60,7 +60,7 @@ var tbxTransport = (() => {
   let welcomed = false; // has the live socket completed its handshake?
   let connecting = false; // a connect() is between reading the pairing and its socket
   let lastPairing = null; // {port, token} of the daemon the schedules apply to
-  let consecutiveFailures = 0; // closes since the last `welcome`
+  let consecutiveFailures = 0; // attempts in a row that ended without a `welcome`
   let lastCloseCode = null;
   let lastCloseAt = null;
   let lastWelcomeAt = null;
@@ -278,7 +278,12 @@ var tbxTransport = (() => {
     }
     tbxLog.debug(`retrying in ${delay}ms (${why})`);
     clearTimeout(retryTimer);
-    retryTimer = setTimeout(connect, delay);
+    retryTimer = setTimeout(() => {
+      // Cleared before the attempt, not after it: `retryTimer` is what tells the
+      // supervisor whether the chain still has a link left to follow.
+      retryTimer = null;
+      connect();
+    }, delay);
   }
 
   /**
@@ -407,14 +412,19 @@ var tbxTransport = (() => {
       // thing a user needs to be able to see without turning on verbose logging.
       tbxLog.info(`socket closed (code ${code}: ${reason})`);
 
-      consecutiveFailures += 1;
-      if (consecutiveFailures === HANDSHAKE_ALARM_AFTER) {
-        // Once per run of failures. Saying it every time would bury it.
-        tbxLog.error(
-          `the daemon on port ${pairing.port} accepted ${consecutiveFailures} connections ` +
-            "but none completed the handshake — restart Thunderbird if this persists; " +
-            "`tbmcp doctor` shows the daemon's view"
-        );
+      // Only an attempt that never reached `welcome` counts: a daemon that worked
+      // and then went away is not this end failing, and counting it would make the
+      // complaint below claim a handshake failed when one had just succeeded.
+      if (!hadWelcome) {
+        consecutiveFailures += 1;
+        if (consecutiveFailures === HANDSHAKE_ALARM_AFTER) {
+          // Once per run of failures. Saying it every time would bury it.
+          tbxLog.error(
+            `the daemon on port ${pairing.port} accepted ${consecutiveFailures} connections ` +
+              "but none completed the handshake — restart Thunderbird if this persists; " +
+              "`tbmcp doctor` shows the daemon's view"
+          );
+        }
       }
       notify(false);
 
@@ -466,17 +476,21 @@ var tbxTransport = (() => {
    *    one stays open, so nothing tells us to move, and every tool call through the
    *    new daemon reports "Thunderbird is not connected" while both sides look fine.
    *    Comparing the advertised port to ours catches that.
-   * 2. `connect()` returns early whenever a socket already exists, so if it is ever
-   *    entered while one is still CONNECTING, no new timer gets armed and the chain
-   *    dies until that socket closes. A periodic tick makes that unrecoverable state
-   *    impossible.
+   * 2. The retry chain ends up with no link left to follow. The watchdogs above make
+   *    that all but impossible now — a socket that stalls at either half of the
+   *    handshake closes itself, and a close always arms a retry — so this is a
+   *    safety net, and it must behave like one: a retry that is already armed owns
+   *    the schedule, and taking it over turned every backoff longer than the tick
+   *    into a ten-second one.
    */
   async function supervise() {
     if (stopped) {
       return;
     }
     if (!socket) {
-      connect();
+      if (!retryTimer) {
+        connect();
+      }
       return;
     }
     if (socket.readyState !== WebSocket.OPEN) {
@@ -519,6 +533,7 @@ var tbxTransport = (() => {
     stop() {
       stopped = true;
       clearTimeout(retryTimer);
+      retryTimer = null;
       clearTimeout(helloTimer);
       clearTimeout(connectTimer);
       clearInterval(supervisor);

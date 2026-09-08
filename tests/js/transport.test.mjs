@@ -336,6 +336,58 @@ describe("retry schedule", () => {
   });
 });
 
+describe("supervisor", () => {
+  it("leaves a pending retry alone", async () => {
+    const world = makeWorld();
+    await world.start();
+
+    // Line the third failure up so the supervisor's 10s tick falls inside the 2s
+    // backoff that follows it — the case that used to turn every longer wait into
+    // a ten-second one.
+    await world.clock.advance(8000);
+    world.WebSocket.instances.at(-1).serverClose(1006, "closed by the daemon");
+    await world.clock.advance(500);
+    world.WebSocket.instances.at(-1).serverClose(1006, "closed by the daemon");
+    await world.clock.advance(1000);
+    world.WebSocket.instances.at(-1).serverClose(1006, "closed by the daemon");
+    assert.equal(world.WebSocket.instances.length, 3);
+    assert.equal(world.clock.now(), 9500);
+
+    await world.clock.advance(1999); // the tick at 10000ms lands in here
+    assert.equal(world.WebSocket.instances.length, 3, "the tick pre-empted the backoff");
+    await world.clock.advance(1);
+    assert.equal(world.WebSocket.instances.length, 4);
+  });
+
+  it("has nothing left to run after stop()", async () => {
+    const world = makeWorld();
+    const ws = await world.start();
+    ws.open();
+    ws.receive({ t: "welcome" });
+
+    world.transport.stop();
+
+    assert.deepEqual(ws.closeCalls, [{ code: 1000, reason: "shutting down" }]);
+    await world.clock.advance(60000);
+    assert.equal(world.WebSocket.instances.length, 1);
+  });
+
+  it("follows the daemon when it moves to another port", async () => {
+    let advertised = { version: 1, port: 4711, token: "old" };
+    const world = makeWorld({ pairing: () => advertised });
+    const ws = await world.start();
+    ws.open();
+    ws.receive({ t: "welcome" });
+
+    advertised = { version: 1, port: 4712, token: "new" };
+    await world.clock.advance(10000);
+
+    assert.deepEqual(ws.closeCalls, [{ code: 1000, reason: "following the pairing file" }]);
+    await world.clock.advance(500);
+    assert.equal(world.WebSocket.instances.at(-1).url, "ws://127.0.0.1:4712/tbmcp");
+  });
+});
+
 describe("visible state", () => {
   const BACKOFF = [500, 1000, 2000, 4000];
 
@@ -381,11 +433,16 @@ describe("visible state", () => {
     recovered.open();
     recovered.receive({ t: "welcome" });
 
+    // The daemon going away does not count towards the next complaint...
     recovered.serverClose(1006, "daemon exited");
     await world.clock.advance(500);
-    for (let index = 0; index < 3; index += 1) {
+    for (let index = 0; index < 2; index += 1) {
       await failCycle(world, index);
     }
+    assert.equal(complaints(world).length, 1, "counted the daemon going away");
+
+    // ...only three attempts that never handshake do.
+    await failCycle(world, 2);
 
     assert.equal(complaints(world).length, 2);
   });
@@ -428,8 +485,16 @@ describe("status", () => {
     assert.equal(seen.length, 2);
     assert.equal(seen.at(-1).state, "disconnected");
     assert.equal(seen.at(-1).lastCloseCode, 1006);
-    assert.equal(seen.at(-1).consecutiveFailures, 1);
     assert.match(seen.at(-1).lastCloseAt, /^\d{4}-\d\d-\d\dT/);
+    // The daemon going away after a working session is not an attempt that failed.
+    assert.equal(seen.at(-1).consecutiveFailures, 0);
+
+    await world.clock.advance(500);
+    world.WebSocket.instances.at(-1).serverClose(1006, "closed by the daemon");
+    await world.clock.advance(500);
+    world.WebSocket.instances.at(-1).serverClose(1006, "closed by the daemon");
+
+    assert.equal(world.transport.status().consecutiveFailures, 2);
   });
 
   it("does not report every failure in a burst", async () => {
