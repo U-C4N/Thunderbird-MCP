@@ -74,6 +74,20 @@ def test_every_background_script_ships(built) -> None:
         assert script in names, f"{script} is in the manifest but not in the package"
 
 
+def test_manifest_permissions_are_known_to_thunderbird() -> None:
+    """An unknown permission is not a no-op.
+
+    Thunderbird 155 logs `Error processing permissions.17: Value "messages.tags"`
+    at install time; the real names are messagesTags and messagesTagsList, which
+    are already listed.
+    """
+    import json
+
+    manifest = json.loads((addon_source_dir() / "manifest.json").read_text(encoding="utf-8"))
+    assert "messages.tags" not in manifest["permissions"]
+    assert {"messagesTags", "messagesTagsList"} <= set(manifest["permissions"])
+
+
 def test_build_is_reproducible(tmp_path) -> None:
     first = build_xpi(tmp_path / "a")
     second = build_xpi(tmp_path / "b")
