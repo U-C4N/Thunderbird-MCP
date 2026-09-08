@@ -29,7 +29,7 @@ CHECKS: list[tuple[str, dict, str]] = [
     ("account_list", {}, "count"),
     ("folder_list", {}, "count"),
     ("mail_tags", {}, "count"),
-    ("search_index_status", {}, "indexerEnabled"),
+    ("search_index_status", {}, "enabled"),
     ("pref_get", {"name": "mail.pane_config.dynamic"}, "value"),
     ("pref_list", {"prefix": "mailnews.tags.", "only_user_set": True}, "count"),
     ("identity_list", {}, "count"),
