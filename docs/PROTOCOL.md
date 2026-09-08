@@ -22,8 +22,19 @@ Every frame has a `t` (type) discriminator.
 }
 ```
 
-The daemon replies `{"t":"welcome","sessionId":"...","serverVersion":"..."}` or closes
-with code 4001 (`bad token`) / 4002 (`protocol mismatch`).
+The daemon replies `{"t":"welcome","protocol":1,"server":"tbmcp"}` or closes the
+socket. Close codes, from either side:
+
+| Code | Sent by | Meaning |
+|---|---|---|
+| 1012 | daemon | superseded — a newer add-on connection replaced this one |
+| 4000 | add-on | watchdog — no `welcome` within 8 s of `hello`, or the socket never left CONNECTING within 15 s |
+| 4001 | daemon | bad token — the pairing file the add-on read is stale |
+| 4002 | daemon | no `hello` within 10 s, a malformed `hello`, or a protocol mismatch |
+| 4003 | daemon | non-loopback peer |
+
+The daemon records the outcome of every add-on connection attempt; `tb_status`,
+`tb_diagnostics` and `tbmcp doctor` report the recent failures and what they mean.
 
 ### `req` — daemon → add-on
 
