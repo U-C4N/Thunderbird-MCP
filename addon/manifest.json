@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Thunderbird MCP Bridge",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Lets a local MCP server drive this Thunderbird: mail, folders, contacts, calendar, filters and settings.",
   "author": "thunderbird-mcp",
   "browser_specific_settings": {
