@@ -1,7 +1,7 @@
 [![CI](https://github.com/U-C4N/Thunderbird-MCP/actions/workflows/ci.yml/badge.svg)](https://github.com/U-C4N/Thunderbird-MCP/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-2.0-6E56CF)](https://github.com/modelcontextprotocol/python-sdk)
-[![Thunderbird](https://img.shields.io/badge/Thunderbird-128%20%E2%80%93%20153-0A84FF)](https://www.thunderbird.net/)
+[![Thunderbird](https://img.shields.io/badge/Thunderbird-128%20%E2%80%93%20155-0A84FF)](https://www.thunderbird.net/)
 [![Tools](https://img.shields.io/badge/tools-112-brightgreen)](docs/TOOL-REFERENCE.md)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Stars](https://img.shields.io/github/stars/U-C4N/Thunderbird-MCP?style=flat)](https://github.com/U-C4N/Thunderbird-MCP/stargazers)

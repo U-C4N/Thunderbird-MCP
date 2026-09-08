@@ -62,6 +62,23 @@ model should fix the call), `unsupported` (this Thunderbird build cannot do it),
 `blocked` (a safety rule refused; `error.needs` lists what would unblock it), or
 `internal`.
 
+Inside the add-on, an error crossing from the privileged half to the background page
+travels as an `ExtensionError` whose message is `tbxerr:` followed by that same JSON
+object (`kind`, `message`, `code`, `needs`): Thunderbird keeps the message of an
+`ExtensionError` and discards the rest, so the message is the only channel. The
+background page unpacks it (`tbxError.fromWire`) before the frame above is built;
+nothing tagged `tbxerr:` ever reaches the daemon.
+
+#### Cursors
+
+`messages.query` and `messages.list` return a `cursor` when more remains. It is
+either a raw Thunderbird message-list id (the page boundary coincided with `limit`)
+or `tbx:<load>:<n>`, minted by the add-on when `limit` stopped mid-page: the unread
+remainder of that page is parked behind it, and at most 32 such tails are kept —
+the oldest is evicted and its underlying list aborted. Resuming a cursor from an
+earlier page load, or an evicted one, is a `usage` error rather than a different
+page.
+
 ### `progress` — add-on → daemon, optional, repeatable
 
 ```json

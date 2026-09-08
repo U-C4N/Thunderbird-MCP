@@ -192,19 +192,25 @@ async def main() -> int:
         folders = (await call("folder_list", {"limit": 200})).structured_content["items"]
         known = {f["id"] for f in folders}
         folder = biggest_folder(folders)
+        term = None
         if folder is None:
+            # Every check that needs a corpus is skipped one by one below, saying so;
+            # the ones that do not — index status, the bad folder id — still run.
             report.skip("corpus", f"no real folder holds {MIN_FOLDER}+ messages")
-            return 1 if report.failures else 0
-        listed = (
-            await call("mail_list", {"folder_id": folder["id"], "limit": 50})
-        ).structured_content
-        term = common_term(listed["items"])
-        print(
-            f"        corpus: {folder['id']} ({folder.get('totalMessageCount')} messages), term {term!r}\n"
-        )
+        else:
+            listed = (
+                await call("mail_list", {"folder_id": folder["id"], "limit": 50})
+            ).structured_content
+            term = common_term(listed["items"])
+            print(
+                f"        corpus: {folder['id']} ({folder.get('totalMessageCount')} messages), "
+                f"term {term!r}\n"
+            )
 
         # ---- substring search
-        if term is None:
+        if folder is None:
+            report.skip("mail_search subject", "no corpus")
+        elif term is None:
             report.skip("mail_search subject", "no word shared by three subjects")
         else:
             found = report.check(
@@ -298,7 +304,9 @@ async def main() -> int:
                 else f"indexedMessages is {got.get('indexedMessages')!r}"
             ),
         )
-        if term is not None:
+        if term is None:
+            report.skip("search_global unmatchable term", "no term")
+        else:
             report.check(
                 "search_global unmatchable term",
                 await call("search_global", {"query": f"{term} 2.0", "limit": 5}),
@@ -318,20 +326,25 @@ async def main() -> int:
             report.failures.append("search_global bad folder id")
 
         # ---- paging conservation
-        straight = [
-            m["id"]
-            for m in (
-                await call("mail_list", {"folder_id": folder["id"], "limit": 12})
-            ).structured_content["items"]
-        ]
-        if len(straight) < 12:
-            report.skip("mail_list paging", "fewer than 12 messages")
+        if folder is None:
+            report.skip("mail_list paging", "no corpus")
         else:
-            gap = paging_gap(
-                await _walk(call, "mail_list", {"folder_id": folder["id"]}, 3, 4), straight
-            )
-            _verdict(report, "mail_list paging 3x4 == 12", gap)
-        if term is not None:
+            straight = [
+                m["id"]
+                for m in (
+                    await call("mail_list", {"folder_id": folder["id"], "limit": 12})
+                ).structured_content["items"]
+            ]
+            if len(straight) < 12:
+                report.skip("mail_list paging", "fewer than 12 messages")
+            else:
+                gap = paging_gap(
+                    await _walk(call, "mail_list", {"folder_id": folder["id"]}, 3, 4), straight
+                )
+                _verdict(report, "mail_list paging 3x4 == 12", gap)
+        if term is None:
+            report.skip("mail_search paging", "no term")
+        else:
             straight = [
                 m["id"]
                 for m in (
@@ -347,7 +360,9 @@ async def main() -> int:
                 _verdict(report, "mail_search paging 3x4 == 12", gap)
 
         # ---- a wide answer must not drop the connection
-        if term is not None:
+        if term is None:
+            report.skip("search_global wide answer", "no term")
+        else:
             wide = await call("search_global", {"query": term, "limit": 200})
             after = (await call("tb_status", {})).structured_content
             if wide.is_error or not after.get("connected"):

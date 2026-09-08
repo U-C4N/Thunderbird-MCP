@@ -6,8 +6,9 @@ Thunderbird has no external API. Anything that wants to drive it must run *insid
 Thunderbird. The only questions are how privileged that inside code can be, and how
 it talks to the outside.
 
-Every claim below was verified against a live **Thunderbird 153.0** (Windows 11,
-build `20260717002111`), not inferred from documentation. See
+Every claim below was verified against a live Thunderbird — **153.0** (Windows 11,
+build `20260717002111`) when first written, **155.0** for 1.3.0 — not inferred from
+documentation. See
 [`docs/VERIFIED-FINDINGS.md`](VERIFIED-FINDINGS.md) for the raw probe output.
 
 ### The privilege question
@@ -42,9 +43,10 @@ and `fetch("http://127.0.0.1:PORT/...")`. The default MV2 CSP does not restrict
 The honest cost of this choice: the connection lives in the add-on's background page,
 so its lifetime and reconnect behaviour are now ours to manage. A server *inside*
 Thunderbird would simply be listening whenever Thunderbird is up. In practice the page
-is persistent on 153 and stays connected, but reattaching after the daemon dies
-abnormally is still slower than it should be — measured in
-[`VERIFIED-FINDINGS.md`](VERIFIED-FINDINGS.md).
+is persistent on 153–155 and stays connected. Reattaching after the daemon dies
+abnormally used to be slow — measured in
+[`VERIFIED-FINDINGS.md`](VERIFIED-FINDINGS.md); since 1.3.0 the add-on's transport
+watchdogs reconnect within seconds, and the daemon records every attempt.
 
 Benefits over an in-Thunderbird HTTP server:
 
