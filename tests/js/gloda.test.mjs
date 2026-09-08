@@ -211,3 +211,121 @@ describe("gloda.search truncation", () => {
     assert.equal(result.hits.length, 25);
   });
 });
+
+/** An identity as gloda models one: an address, optionally with a contact name. */
+function identity(name, address) {
+  return { value: address, contact: name ? { name } : null };
+}
+
+const ADA = identity("Ada", "ada@example.invalid");
+const BOB = identity("Bob", "bob@example.invalid");
+const CARA = identity(null, "cara@example.invalid");
+
+/** A gloda whose only query answers with `seed`. */
+function fakeGloda(seed) {
+  return {
+    newQuery() {
+      return {
+        headerMessageID() {
+          return this;
+        },
+        getCollection(listener) {
+          listener.onItemsAdded([seed]);
+          listener.onQueryCompleted();
+        },
+      };
+    },
+  };
+}
+
+/** The modules `gloda.conversation` reaches for, over one fixed thread. */
+function threadModules(messages) {
+  const conversation = {
+    id: 77,
+    subject: "Shipment",
+    oldestMessageDate: new Date(1700000000000),
+    newestMessageDate: new Date(1700000120000),
+    getMessagesCollection(listener) {
+      listener.onItemsAdded(messages);
+      listener.onQueryCompleted();
+    },
+  };
+  const seed = { ...messages[0], conversation };
+  return {
+    "resource:///modules/gloda/GlodaPublic.sys.mjs": { Gloda: fakeGloda(seed) },
+    "resource:///modules/gloda/GlodaConstants.sys.mjs": { GlodaConstants: { NOUN_MESSAGE: 5 } },
+  };
+}
+
+describe("gloda.conversation", () => {
+  it("names everyone who took part, once each, in the order they appear", async () => {
+    const [first, second, third] = corpus(3);
+    const messages = [
+      { ...first, date: new Date(1700000120000), involves: [ADA, BOB] },
+      { ...second, date: new Date(1700000060000), involves: [BOB, CARA] },
+      { ...third, date: new Date(1700000000000), involves: [ADA] },
+    ];
+    const { call } = experiment({ modules: threadModules(messages) });
+
+    const result = plain(await call("gloda.conversation", { headerMessageId: "<g0@x>" }));
+
+    assert.deepEqual(result.participants, [
+      "Ada <ada@example.invalid>",
+      "Bob <bob@example.invalid>",
+      "cara@example.invalid",
+    ]);
+    assert.equal(result.total, 3);
+    assert.deepEqual(
+      result.messages.map((message) => message.glodaId),
+      [1002, 1001, 1000],
+      "oldest first, which only works now that the hits carry dates"
+    );
+  });
+
+  it("falls back to the addresses it has when gloda indexed no participants", async () => {
+    const [only] = corpus(1);
+    const messages = [{ ...only, involves: [], from: ADA, to: [BOB] }];
+    const { call } = experiment({ modules: threadModules(messages) });
+
+    const result = plain(await call("gloda.conversation", { headerMessageId: "<g0@x>" }));
+
+    assert.deepEqual(result.participants, [
+      "Ada <ada@example.invalid>",
+      "Bob <bob@example.invalid>",
+    ]);
+  });
+});
+
+describe("gloda.stats", () => {
+  it("counts the indexed messages instead of giving up on the deadline", async () => {
+    const datastore = {
+      asyncConnection: {
+        createAsyncStatement: () => ({
+          executeAsync(handler) {
+            let served = false;
+            handler.handleResult({
+              getNextRow() {
+                if (served) {
+                  return null;
+                }
+                served = true;
+                return { getInt64: () => 2185 };
+              },
+            });
+            handler.handleCompletion();
+          },
+          finalize() {},
+        }),
+      },
+    };
+    const { call } = experiment({
+      modules: {
+        "resource:///modules/gloda/GlodaDatastore.sys.mjs": { GlodaDatastore: datastore },
+      },
+    });
+
+    const stats = plain(await call("gloda.stats"));
+
+    assert.equal(stats.indexedMessages, 2185);
+  });
+});

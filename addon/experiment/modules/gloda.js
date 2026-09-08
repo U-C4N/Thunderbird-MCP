@@ -220,6 +220,36 @@ TBX_MODULE_NAMES.push("gloda");
     }
   }
 
+  /** The identities a message involves, or the addresses we do have.
+   *
+   *  Reading an attribute gloda did not index for this message throws, so the
+   *  whole walk is guarded rather than each access. */
+  function involved(message) {
+    try {
+      if (message.involves && message.involves.length) {
+        return [...message.involves];
+      }
+      return [message.from, ...(message.to || [])];
+    } catch (ex) {
+      return [];
+    }
+  }
+
+  /** Everyone in a thread, in the order they first appear — which reads as the
+   *  order they joined the discussion. */
+  function participants(messages) {
+    const labels = [];
+    for (const message of messages) {
+      for (const identity of involved(message)) {
+        const label = identityLabel(identity);
+        if (label && !labels.includes(label)) {
+          labels.push(label);
+        }
+      }
+    }
+    return labels;
+  }
+
   function snippet(message) {
     let text = null;
     try {
@@ -479,6 +509,7 @@ TBX_MODULE_NAMES.push("gloda");
     return {
       conversationId: conversation.id,
       subject: conversation.subject,
+      participants: participants(messages),
       oldestDate: isoDate(conversation.oldestMessageDate),
       newestDate: isoDate(conversation.newestMessageDate),
       messages: ordered.slice(0, limit),
