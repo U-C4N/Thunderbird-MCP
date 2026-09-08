@@ -30,6 +30,7 @@ from websockets.exceptions import ConnectionClosed
 
 from . import ipc
 from .errors import NotConnectedError, TimeoutError_, TransportError, from_wire
+from .handshake import HandshakeLog, describe_handshake
 from .profile import BRIDGE_FILE, ThunderbirdProfile, find_profile
 
 log = logging.getLogger("tbmcp.daemon")
@@ -37,6 +38,9 @@ log = logging.getLogger("tbmcp.daemon")
 CHUNK_LIMIT = 4 * 1024 * 1024
 PING_INTERVAL = 20.0
 DEFAULT_IDLE_TIMEOUT = 900.0
+HELLO_TIMEOUT = 10.0
+"""How long a connected add-on has to send its `hello`. A module constant so the
+handshake tests can shorten it without waiting out a real ten seconds."""
 
 ProgressCb = Callable[[dict[str, Any]], Awaitable[None]]
 
@@ -233,6 +237,7 @@ class Daemon:
         self.startup_lock = startup_lock
         self.addon_token = ipc.new_token()
         self.control_token = ipc.new_token()
+        self.handshakes = HandshakeLog()
         self.session: AddonSession | None = None
         self.events: deque[dict[str, Any]] = deque(maxlen=event_buffer)
         self.event_seq = 0
@@ -246,29 +251,58 @@ class Daemon:
     # ------------------------------------------------------------------ add-on side
 
     async def _serve_addon(self, ws: ServerConnection) -> None:
+        """One add-on connection, from the upgrade to whatever ends it.
+
+        Every exit records its own outcome in `self.handshakes`. Splitting what used
+        to be one `except` is the point: "the socket closed before the hello" and
+        "the hello was not JSON" are different faults with different remedies, and
+        collapsing them left the user with nothing but a 4002 close code.
+        """
         peer = ws.remote_address[0] if ws.remote_address else "?"
         if peer not in ("127.0.0.1", "::1", "localhost"):
+            self.handshakes.resolve(ws, "non-loopback", close_code=4003, detail=str(peer))
             await ws.close(code=4003, reason="non-loopback peer")
             return
         try:
-            raw = await asyncio.wait_for(ws.recv(), timeout=10.0)
-            hello = json.loads(raw)
-        except (TimeoutError, ConnectionClosed, json.JSONDecodeError, TypeError):
+            raw = await asyncio.wait_for(ws.recv(), timeout=HELLO_TIMEOUT)
+        except TimeoutError:
+            self.handshakes.resolve(
+                ws, "no-hello-timeout", close_code=4002, detail=f"{HELLO_TIMEOUT:g}s"
+            )
             await ws.close(code=4002, reason="expected a hello frame")
+            return
+        except ConnectionClosed:
+            # Already gone: there is nothing left to close, only to record.
+            self.handshakes.resolve(ws, "closed-before-hello", close_code=ws.close_code)
+            return
+        try:
+            hello = json.loads(raw)
+        except (json.JSONDecodeError, TypeError) as exc:
+            await self._reject_hello(ws, detail=str(exc))
             return
         if not isinstance(hello, dict) or hello.get("t") != "hello":
-            await ws.close(code=4002, reason="expected a hello frame")
+            await self._reject_hello(ws, detail=f"first frame was {type(hello).__name__}")
             return
         if hello.get("token") != self.addon_token:
-            log.warning("rejected an add-on connection with a bad token")
+            self.handshakes.resolve(ws, "bad-token", close_code=4001)
             await ws.close(code=4001, reason="bad token")
             return
-        if int(hello.get("protocol", 0)) != ipc.PROTOCOL_VERSION:
+        try:
+            protocol = int(hello.get("protocol", 0))
+        except (TypeError, ValueError):
+            # A non-numeric version used to raise straight out of the handler, so
+            # websockets logged a traceback and the add-on was told nothing at all.
+            protocol = -1
+        if protocol != ipc.PROTOCOL_VERSION:
+            self.handshakes.resolve(
+                ws, "protocol-mismatch", close_code=4002, detail=f"protocol {protocol}"
+            )
             await ws.close(code=4002, reason="protocol mismatch")
             return
 
         if self.session is not None:
             # A restarted Thunderbird, or a second window; the newest wins.
+            self.handshakes.resolve(self.session.ws, "superseded", close_code=1012)
             with contextlib.suppress(ConnectionClosed):
                 await self.session.ws.close(code=1012, reason="superseded")
 
@@ -278,6 +312,7 @@ class Daemon:
         await ws.send(
             json.dumps({"t": "welcome", "protocol": ipc.PROTOCOL_VERSION, "server": "tbmcp"})
         )
+        self.handshakes.resolve(ws, "welcomed", addon_version=session.addon_version)
         log.info(
             "add-on connected: %s %s (experiment=%s)",
             session.app.get("name", "Thunderbird"),
@@ -294,7 +329,61 @@ class Daemon:
             if self.session is session:
                 self.session = None
                 self._session_ready.clear()
-            log.info("add-on disconnected")
+            # A no-op for a session we superseded: that outcome is already final.
+            self.handshakes.resolve(ws, "disconnected", close_code=ws.close_code)
+
+    async def _reject_hello(self, ws: ServerConnection, *, detail: str) -> None:
+        self.handshakes.resolve(ws, "bad-hello", close_code=4002, detail=detail)
+        await ws.close(code=4002, reason="expected a hello frame")
+
+    def _connection_class(self) -> type[ServerConnection]:
+        """A `ServerConnection` that reports the whole life of the TCP connection.
+
+        `_serve_addon` only runs once the HTTP upgrade has succeeded, so a client
+        that connects and never upgrades — which is exactly what Thunderbird did for
+        half an hour — is invisible to it. These two hooks are the only place that
+        sees it happen.
+        """
+        handshakes = self.handshakes
+
+        class TelemetryConnection(ServerConnection):
+            def connection_made(self, transport: asyncio.BaseTransport) -> None:
+                # After super(): it installs the transport that `remote_address`,
+                # and so the peer port, is read from.
+                super().connection_made(transport)
+                handshakes.opened(self)
+
+            def connection_lost(self, exc: Exception | None) -> None:
+                super().connection_lost(exc)
+                handshakes.resolve(self, "no-upgrade")
+
+        return TelemetryConnection
+
+    def _on_upgrade_request(self, conn: ServerConnection, request: Any) -> None:
+        """`process_request`: note who is dialling in, then accept by returning None."""
+        # Nothing here may raise: websockets turns an exception from process_request
+        # into a 500 and rejects the connection, which would make the telemetry the
+        # outage it is meant to explain.
+        with contextlib.suppress(Exception):
+            self.handshakes.note_request(
+                conn,
+                path=getattr(request, "path", None),
+                origin=request.headers.get("Origin"),
+                user_agent=request.headers.get("User-Agent"),
+            )
+        return None
+
+    def _addon_server(self, **overrides: Any) -> serve:
+        """The add-on listener, factored out so tests exercise the server `run` runs."""
+        kwargs: dict[str, Any] = {
+            "host": "127.0.0.1",
+            "port": 0,
+            "max_size": CHUNK_LIMIT * 2,
+            "create_connection": self._connection_class(),
+            "process_request": self._on_upgrade_request,
+        }
+        kwargs.update(overrides)
+        return serve(self._serve_addon, **kwargs)
 
     def _record_event(self, frame: dict[str, Any]) -> None:
         self.event_seq += 1
@@ -417,7 +506,7 @@ class Daemon:
             try:
                 await asyncio.wait_for(self._session_ready.wait(), timeout=wait)
             except TimeoutError:
-                raise NotConnectedError() from None
+                raise self._not_connected() from None
             return self.status()
         if method == "daemon.shutdown":
             self._stop.set()
@@ -425,8 +514,16 @@ class Daemon:
 
         session = self.session
         if session is None:
-            raise NotConnectedError()
+            raise self._not_connected()
         return await session.call(method, params, timeout=timeout, on_progress=on_progress)
+
+    def _not_connected(self) -> NotConnectedError:
+        """ "Not connected", carrying the diagnosis when we have one.
+
+        Every tool call that fails this way is someone asking why, so the answer
+        travels with the failure rather than waiting for them to run `doctor`.
+        """
+        return NotConnectedError(describe_handshake(self.handshakes.summary()))
 
     def status(self) -> dict[str, Any]:
         return {
@@ -440,6 +537,10 @@ class Daemon:
             "profile": {"path": str(self.profile.path), "name": self.profile.name},
             "thunderbird": self.session.describe() if self.session else None,
             "connected": self.session is not None,
+            "handshake": self.handshakes.summary(),
+            # Nothing the daemon logs reaches a terminal — it is spawned detached
+            # with its streams on DEVNULL — so every reporter needs the path.
+            "logFile": str(ipc.daemon_log_path()),
         }
 
     # ------------------------------------------------------------------ lifecycle
@@ -501,9 +602,7 @@ class Daemon:
             await asyncio.start_server(
                 self._serve_control, host="127.0.0.1", port=0, limit=ipc.MAX_LINE
             ) as control,
-            serve(
-                self._serve_addon, host="127.0.0.1", port=0, max_size=CHUNK_LIMIT * 2
-            ) as addon_server,
+            self._addon_server() as addon_server,
         ):
             control_port = control.sockets[0].getsockname()[1]
             addon_port = addon_server.sockets[0].getsockname()[1]

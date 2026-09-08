@@ -34,6 +34,16 @@ def state_dir() -> Path:
     return path
 
 
+def daemon_log_path() -> Path:
+    """Where the daemon keeps its log.
+
+    The daemon is spawned detached with its streams on DEVNULL, so everything it
+    logs is discarded the moment it is written. One known path is what turns "the
+    bridge went quiet" into something anyone can read after the fact.
+    """
+    return state_dir() / "daemon.log"
+
+
 @dataclass
 class DaemonInfo:
     """Contents of `<state_dir>/daemon.json` — how `serve` finds the daemon."""

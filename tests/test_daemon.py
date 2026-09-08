@@ -12,12 +12,21 @@ healthy — which is why they are pinned down as tests rather than left to judge
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import json
+import logging
 import os
+import time
 
 import pytest
+from websockets.asyncio.client import connect as ws_connect
+from websockets.exceptions import ConnectionClosed
 
 from tbmcp import ipc
-from tbmcp.daemon import run_daemon
+from tbmcp.daemon import Daemon, run_daemon
+from tbmcp.errors import NotConnectedError
+from tbmcp.profile import ThunderbirdProfile
 
 pytestmark = pytest.mark.anyio
 
@@ -128,8 +137,6 @@ async def test_a_missing_profile_releases_the_lock(isolated_state, monkeypatch) 
 
 def test_supersede_rule(isolated_state, monkeypatch) -> None:
     """The watchdog's decision: stand down when the advertisement names someone else."""
-    from tbmcp.daemon import Daemon
-
     # Nothing advertised: keep running.
     assert Daemon.superseded_by() is None
 
@@ -150,3 +157,173 @@ def test_supersede_rule(isolated_state, monkeypatch) -> None:
         ),
     )
     assert Daemon.superseded_by() == 999_001
+
+
+# ------------------------------------------------------- handshake telemetry
+#
+# The morning this class exists for: thunderbird.exe opened two connections to the
+# add-on port every ~25 s for half an hour, each dying ~10 s later with the HTTP
+# upgrade never completed. The handler never ran, so nothing was logged, nothing was
+# counted, and every reporter could only say "Thunderbird is not connected". These
+# tests drive the real `serve()` the daemon runs — same connection class, same
+# process_request hook — because the whole point is what happens *before* the
+# handler.
+
+
+def _daemon(path) -> Daemon:
+    profile = ThunderbirdProfile(path=path, name="test", is_default=True, root=path)
+    return Daemon(profile, idle_timeout=0)
+
+
+def _hello(token: str, *, protocol: object = ipc.PROTOCOL_VERSION) -> str:
+    return json.dumps(
+        {
+            "t": "hello",
+            "token": token,
+            "protocol": protocol,
+            "addonVersion": "1.3.0",
+            "app": {"name": "Thunderbird", "version": "155.0"},
+            "capabilities": {"experiment": True, "namespaces": ["messages"]},
+        }
+    )
+
+
+async def _settled(daemon: Daemon, predicate, *, timeout: float = 2.0) -> dict:
+    """The summary once it says what the test is waiting for.
+
+    Both ends of a close race: the client is told before the server's handler has
+    finished unwinding, and a connection that never upgrades is only recorded when
+    websockets gives up on it.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        summary = daemon.handshakes.summary()
+        if predicate(summary):
+            return summary
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"handshake summary never settled: {summary}")
+        await asyncio.sleep(0.02)
+
+
+class TestHandshakeTelemetry:
+    async def test_a_client_that_never_says_hello_is_recorded(
+        self, isolated_state, monkeypatch
+    ) -> None:
+        monkeypatch.setattr("tbmcp.daemon.HELLO_TIMEOUT", 0.3)
+        daemon = _daemon(isolated_state)
+        async with daemon._addon_server(open_timeout=0.3) as server:
+            port = server.sockets[0].getsockname()[1]
+            async with ws_connect(f"ws://127.0.0.1:{port}/tbmcp") as ws:
+                with pytest.raises(ConnectionClosed):
+                    await asyncio.wait_for(ws.recv(), timeout=5.0)
+                assert ws.close_code == 4002
+
+        summary = daemon.status()["handshake"]
+        assert summary["lastOutcome"] == "no-hello-timeout"
+        assert summary["recentFailures"] == 1
+
+    async def test_a_stale_token_is_recorded_without_being_logged(
+        self, isolated_state, caplog
+    ) -> None:
+        daemon = _daemon(isolated_state)
+        with caplog.at_level(logging.DEBUG):
+            async with daemon._addon_server(open_timeout=0.3) as server:
+                port = server.sockets[0].getsockname()[1]
+                async with ws_connect(f"ws://127.0.0.1:{port}/tbmcp") as ws:
+                    await ws.send(_hello("not-the-token"))
+                    with pytest.raises(ConnectionClosed):
+                        await asyncio.wait_for(ws.recv(), timeout=5.0)
+                    assert ws.close_code == 4001
+
+        summary = daemon.handshakes.summary()
+        assert summary["lastOutcome"] == "bad-token"
+        assert daemon.addon_token not in caplog.text, "a token must never reach a log"
+
+    async def test_a_non_numeric_protocol_is_a_mismatch_not_a_crash(
+        self, isolated_state, caplog
+    ) -> None:
+        """`int(hello["protocol"])` on a string raised straight out of the handler:
+        websockets logged a traceback and the add-on learnt nothing."""
+        daemon = _daemon(isolated_state)
+        with caplog.at_level(logging.DEBUG):
+            async with daemon._addon_server(open_timeout=0.3) as server:
+                port = server.sockets[0].getsockname()[1]
+                async with ws_connect(f"ws://127.0.0.1:{port}/tbmcp") as ws:
+                    await ws.send(_hello(daemon.addon_token, protocol="x"))
+                    with pytest.raises(ConnectionClosed):
+                        await asyncio.wait_for(ws.recv(), timeout=5.0)
+                    assert ws.close_code == 4002
+
+        assert daemon.handshakes.summary()["lastOutcome"] == "protocol-mismatch"
+        assert "Traceback" not in caplog.text
+
+    async def test_a_good_hello_is_welcomed_and_then_disconnects(self, isolated_state) -> None:
+        daemon = _daemon(isolated_state)
+        async with daemon._addon_server(open_timeout=0.3) as server:
+            port = server.sockets[0].getsockname()[1]
+            async with ws_connect(f"ws://127.0.0.1:{port}/tbmcp") as ws:
+                await ws.send(_hello(daemon.addon_token))
+                welcome = json.loads(await asyncio.wait_for(ws.recv(), timeout=5.0))
+                assert welcome["t"] == "welcome"
+                assert daemon.status()["connected"] is True
+
+            summary = await _settled(daemon, lambda s: s["lastOutcome"] == "disconnected")
+
+        assert summary["lastCloseCode"] == 1000
+        assert summary["recentFailures"] == 0
+        assert summary["recent"][-1]["addonVersion"] == "1.3.0"
+
+    async def test_the_session_that_is_replaced_reads_as_superseded(self, isolated_state) -> None:
+        daemon = _daemon(isolated_state)
+        async with daemon._addon_server(open_timeout=0.3) as server:
+            port = server.sockets[0].getsockname()[1]
+            async with ws_connect(f"ws://127.0.0.1:{port}/tbmcp") as first:
+                await first.send(_hello(daemon.addon_token))
+                await asyncio.wait_for(first.recv(), timeout=5.0)
+
+                async with ws_connect(f"ws://127.0.0.1:{port}/tbmcp") as second:
+                    await second.send(_hello(daemon.addon_token))
+                    await asyncio.wait_for(second.recv(), timeout=5.0)
+                    with pytest.raises(ConnectionClosed):
+                        await asyncio.wait_for(first.recv(), timeout=5.0)
+                    assert first.close_code == 1012
+
+                    summary = await _settled(
+                        daemon, lambda s: s["recent"][0]["outcome"] == "superseded"
+                    )
+
+        assert [row["outcome"] for row in summary["recent"]] == ["superseded", "welcomed"]
+
+    async def test_a_connection_that_never_upgrades_is_recorded(self, isolated_state) -> None:
+        """The one the handler cannot see: the socket opens, nothing is sent, and
+        websockets drops it when `open_timeout` expires without ever calling us."""
+        daemon = _daemon(isolated_state)
+        async with daemon._addon_server(open_timeout=0.3) as server:
+            port = server.sockets[0].getsockname()[1]
+            _reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            try:
+                summary = await _settled(daemon, lambda s: s["lastOutcome"] == "no-upgrade")
+            finally:
+                writer.close()
+                with contextlib.suppress(OSError):
+                    await writer.wait_closed()
+
+        assert summary["recentFailures"] == 1
+
+    async def test_a_failing_handshake_reaches_the_caller_of_a_tool(
+        self, isolated_state, monkeypatch
+    ) -> None:
+        """The payoff: every "not connected" now carries why, instead of leaving the
+        model to guess between "start Thunderbird" and a broken add-on."""
+        monkeypatch.setattr("tbmcp.daemon.HELLO_TIMEOUT", 0.3)
+        daemon = _daemon(isolated_state)
+        async with daemon._addon_server(open_timeout=0.3) as server:
+            port = server.sockets[0].getsockname()[1]
+            async with ws_connect(f"ws://127.0.0.1:{port}/tbmcp") as ws:
+                with pytest.raises(ConnectionClosed):
+                    await asyncio.wait_for(ws.recv(), timeout=5.0)
+
+            with pytest.raises(NotConnectedError) as caught:
+                await daemon._invoke("messages.query", {}, timeout=1, on_progress=None)
+
+        assert "never completed the handshake" in caught.value.message
