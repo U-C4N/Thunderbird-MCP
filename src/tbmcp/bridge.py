@@ -151,6 +151,7 @@ class Bridge:
 
     async def _read_loop(self) -> None:
         assert self._reader is not None
+        reason, code = "the daemon connection dropped", "DISCONNECTED"
         try:
             while True:
                 message = await ipc.read_message(self._reader)
@@ -179,14 +180,22 @@ class Bridge:
                     )
         except (TransportError, OSError) as exc:
             log.debug("control read loop ended: %s", exc)
+            if isinstance(exc, TransportError) and exc.code:
+                # A frame we could not read is not a daemon that hung up, and the
+                # caller can only tell the two apart if the code survives the handover.
+                reason, code = exc.message, exc.code
         finally:
             for future in self._pending.values():
                 if not future.done():
-                    future.set_exception(
-                        TransportError("the daemon connection dropped", code="DISCONNECTED")
-                    )
+                    future.set_exception(TransportError(reason, code=code))
             self._pending.clear()
             self._progress.clear()
+            if self._writer is not None:
+                # `_ensure` judges the connection by the writer alone, so a writer left
+                # open once the reader has stopped means the next call writes into a
+                # socket nobody reads and then waits out its whole timeout. Only the
+                # close belongs here: `_teardown` awaits this very task.
+                self._writer.close()
 
     # ------------------------------------------------------------------ public API
 

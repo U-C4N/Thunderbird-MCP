@@ -265,3 +265,59 @@ async def _advertised_daemon() -> ipc.DaemonInfo:
             return info
         await asyncio.sleep(0.05)
     raise AssertionError("the daemon never advertised itself")
+
+
+class _StubWriter:
+    """Just enough writer for what the read loop does on its way out."""
+
+    def __init__(self) -> None:
+        self._closing = False
+
+    def close(self) -> None:
+        self._closing = True
+
+    def is_closing(self) -> bool:
+        return self._closing
+
+
+def _stub_bridge() -> tuple[Bridge, _StubWriter]:
+    """A bridge holding a reader that cannot frame much, and a writer we can watch."""
+    bridge = Bridge(autostart=False)
+    bridge._reader = asyncio.StreamReader(limit=1024)
+    writer = _StubWriter()
+    bridge._writer = writer  # type: ignore[assignment]
+    return bridge, writer
+
+
+def _in_flight(bridge: Bridge) -> asyncio.Future:
+    future = asyncio.get_running_loop().create_future()
+    bridge._pending[1] = future
+    return future
+
+
+async def test_an_oversized_frame_fails_the_call_by_name() -> None:
+    """DISCONNECTED sends whoever reads it looking at the daemon; the size is the one
+    thing they need to know."""
+    bridge, _ = _stub_bridge()
+    pending = _in_flight(bridge)
+    bridge._reader.feed_data(b"x" * 4096)  # no newline, well past the buffer
+    await bridge._read_loop()
+    assert pending.exception().code == "TOO_LARGE"
+
+
+async def test_a_peer_that_hangs_up_still_reads_as_a_disconnect() -> None:
+    bridge, _ = _stub_bridge()
+    pending = _in_flight(bridge)
+    bridge._reader.feed_eof()
+    await bridge._read_loop()
+    assert pending.exception().code == "DISCONNECTED"
+
+
+async def test_the_read_loop_closes_the_writer_it_can_no_longer_read_for() -> None:
+    """`_ensure` judges the connection by the writer alone. Left open after the reader
+    died, the next call wrote into a socket nobody was reading and then waited out its
+    whole timeout — one unreadable frame wedged the bridge for good."""
+    bridge, writer = _stub_bridge()
+    bridge._reader.feed_eof()
+    await bridge._read_loop()
+    assert writer.is_closing()
