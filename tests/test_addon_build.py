@@ -151,3 +151,13 @@ def test_the_globals_the_sandbox_lacks_are_imported(built) -> None:
     _, _, implementation = built
     assert "resource://gre/modules/Timer.sys.mjs" in implementation
     assert "resource://gre/modules/ExtensionUtils.sys.mjs" in implementation
+
+
+def test_nothing_type_checks_a_date_by_instance(built) -> None:
+    """Thunderbird hands the privileged half objects minted in its own realms.
+
+    `value instanceof Date` is false for every Date gloda produces, which is how
+    each search hit came back with `date: null`.
+    """
+    _, _, implementation = built
+    assert "instanceof Date" not in implementation

@@ -130,29 +130,41 @@ TBX_MODULE_NAMES.push("gloda");
     }
   }
 
-  /** Accept a WebExtension folder id or a raw folder URI; gloda speaks URIs. */
-  function folderRefToUri(ref) {
+  /** An account's root folder URI, or null if this account cannot say. */
+  function rootUri(account) {
+    try {
+      return account.incomingServer.rootFolder.URI;
+    } catch (ex) {
+      return null;
+    }
+  }
+
+  /**
+   * A predicate over hits for one folder reference.
+   *
+   * A WebExtension folder id (`account1://INBOX`) and a folder URI
+   * (`imap://me@example.com/INBOX`) both contain `://`, so the only way to tell
+   * them apart is to ask which accounts exist — the id's prefix is an account
+   * key, the URI's is a scheme. Translating the id to a URI is what used to
+   * happen, and it produced `imap://…//INBOX`, which matched nothing at all.
+   * Each hit already carries both, so match on whichever the caller named.
+   */
+  function folderMatcher(ref) {
     const text = String(ref).trim();
-    if (text.includes("://")) {
-      return text;
-    }
     const cut = text.indexOf(":/");
-    if (cut < 1) {
-      throw H.usage(
-        `${text} is not a folder id — pass one returned by folder_list, or a folder URI`
-      );
+    const key = cut > 0 ? text.slice(0, cut) : "";
+    for (const account of needMod("MailServices").accounts.accounts) {
+      if (account.key === key) {
+        return (entry) => entry.folderId === text;
+      }
+      const root = rootUri(account);
+      if (root && (text === root || text.startsWith(`${root}/`))) {
+        return (entry) => entry.folderUri === text;
+      }
     }
-    const accounts = extensionAccounts();
-    if (!accounts || !accounts.folderPathToURI) {
-      throw H.unsupported(
-        "this build cannot translate folder ids to folder URIs; pass a folder URI instead"
-      );
-    }
-    const uri = accounts.folderPathToURI(text.slice(0, cut), text.slice(cut + 1));
-    if (!uri) {
-      throw H.usage(`no account with key ${text.slice(0, cut)}`);
-    }
-    return uri;
+    throw H.usage(
+      `${text} names no folder in this profile — pass an id from folder_list, or a folder URI`
+    );
   }
 
   /** Run a gloda query to completion, or give up loudly. */
@@ -181,9 +193,12 @@ TBX_MODULE_NAMES.push("gloda");
   }
 
   function isoDate(value) {
-    if (value instanceof Date) {
+    // Duck-typed rather than an instance check: gloda mints its Dates in its own
+    // realm, where such a check is always false, so every hit came back undated —
+    // which also collapsed the date ordering onto subject alone.
+    if (value && typeof value.getTime === "function") {
       const ms = value.getTime();
-      return Number.isFinite(ms) ? value.toISOString() : null;
+      return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
     }
     // Gloda stores PRTime (microseconds) and normally hands back a Date, but
     // conversation bounds have been seen raw.
@@ -284,7 +299,7 @@ TBX_MODULE_NAMES.push("gloda");
       MAX_HITS
     );
     const offset = Number.isInteger(params.offset) && params.offset > 0 ? params.offset : 0;
-    const folderUri = params.folderId ? folderRefToUri(params.folderId) : null;
+    const inFolder = params.folderId ? folderMatcher(params.folderId) : null;
     const Searcher = needMod("GlodaMsgSearcher");
 
     const searcher = new Searcher(null, query, params.matchAll !== false);
@@ -304,7 +319,7 @@ TBX_MODULE_NAMES.push("gloda");
     /* Gloda has no OFFSET, and a folder filter can only be applied after the
      * fact because the searcher's SQL is fixed. Over-fetch, then slice. */
     const retrieve = Math.min(
-      Math.max((offset + limit) * (folderUri ? 10 : 3), 50),
+      Math.max((offset + limit) * (inFolder ? 10 : 3), 50),
       MAX_RETRIEVE
     );
     const messages = await collect(
@@ -324,8 +339,8 @@ TBX_MODULE_NAMES.push("gloda");
     // searcher.scores accumulates in the order items were handed to us.
     const scores = searcher.scores || [];
     let hits = messages.map((message, index) => hit(message, scores[index]));
-    if (folderUri) {
-      hits = hits.filter((entry) => entry.folderUri === folderUri);
+    if (inFolder) {
+      hits = hits.filter(inFolder);
     }
     hits.sort((a, b) => (b.score || 0) - (a.score || 0) || byDateThenSubject(b, a));
 
@@ -519,4 +534,9 @@ TBX_MODULE_NAMES.push("gloda");
     }
     return stats;
   };
+
+  /* Pure helpers, published for the add-on's tests; see the note in core.js. */
+  if (typeof TBX_TEST_HOOKS !== "undefined") {
+    TBX_TEST_HOOKS.gloda = { isoDate, folderMatcher };
+  }
 }
