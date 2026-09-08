@@ -123,7 +123,9 @@
     try {
       read = await browser.tbx.invoke("files.read", { path });
     } catch (ex) {
-      throw tbxError.usage(`could not read attachment ${path}: ${ex.message || ex}`);
+      // The privileged half packs its failures into the message; say what it said.
+      const failure = tbxError.fromWire(ex) || ex;
+      throw tbxError.usage(`could not read attachment ${path}: ${failure.message || failure}`);
     }
     return fileFromBase64(name || read.name, read.base64, read.contentType);
   }

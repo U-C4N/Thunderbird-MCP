@@ -111,3 +111,21 @@ describe("tbxError.serialize", () => {
     assert.equal(tbxError.serialize(Object.assign(new Error("x"), { code: "E1" })).code, "E1");
   });
 });
+
+describe("tbxError.fromWire", () => {
+  it("unpacks an envelope for any caller of the privileged half, not just forward()", () => {
+    const { tbxError } = loadScript("background/registry.js");
+
+    const ex = tbxError.fromWire(new Error('tbxerr:{"kind":"usage","message":"no such file"}'));
+
+    assert.equal(ex.tbxKind, "usage");
+    assert.equal(ex.message, "no such file");
+  });
+
+  it("does not claim a message that is not one of ours", () => {
+    const { tbxError } = loadScript("background/registry.js");
+
+    assert.equal(tbxError.fromWire(new Error("plain")), null);
+    assert.equal(tbxError.fromWire(new Error("tbxerr:not json")), null);
+  });
+});

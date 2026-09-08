@@ -22,6 +22,39 @@ var tbxError = {
   thunderbird(message, extra) {
     return Object.assign(new Error(message), { tbxKind: "thunderbird", ...extra });
   },
+  /**
+   * Unpack a failure the privileged half packed into a message, or null.
+   *
+   * Only a message survives the hop out of the experiment sandbox, so
+   * experiment/core.js serialises the whole taxonomy into one and everything
+   * that calls `browser.tbx.invoke` unpacks it here.
+   */
+  fromWire(ex) {
+    const message = String((ex && ex.message) || ex);
+    if (!message.startsWith("tbxerr:")) {
+      return null;
+    }
+    let payload = null;
+    try {
+      payload = JSON.parse(message.slice("tbxerr:".length));
+    } catch (parseError) {
+      return null; // a message that merely starts like ours
+    }
+    if (!payload || !payload.message) {
+      return null;
+    }
+    const extra = payload.code ? { code: payload.code } : undefined;
+    switch (payload.kind) {
+      case "usage":
+        return this.usage(payload.message, extra);
+      case "unsupported":
+        return this.unsupported(payload.message, extra);
+      case "blocked":
+        return this.blocked(payload.message, payload.needs, extra);
+      default:
+        return this.thunderbird(payload.message, extra);
+    }
+  },
   /** Normalise anything thrown into the wire shape. */
   serialize(ex) {
     if (!ex) {
