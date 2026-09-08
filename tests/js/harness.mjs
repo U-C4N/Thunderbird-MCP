@@ -212,6 +212,7 @@ export function fakeBrowser({ pairing = null, manifestVersion = "9.9.9" } = {}) 
       grantOptionalPermission: async () => ({ alreadyHad: true, granted: true }),
       writeStatus: async (report) => {
         browser._written.push(report);
+        return "<profile>/tbmcp-addon-status.json"; // the real one answers with the path
       },
     },
     storage: {

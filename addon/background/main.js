@@ -1,6 +1,11 @@
 /* Entry point. Loaded last, after every handler module has registered itself. */
 
 (async () => {
+  /* Nothing on the way to `tbxTransport.start()` may be able to hang. Every call
+   * below crosses into the privileged half, which is the part that wedges, and a
+   * bridge that never starts cannot even report that it did not. */
+  const PROBE_TIMEOUT_MS = 5000;
+
   await tbxLog.init();
   const manifest = browser.runtime.getManifest();
   tbxLog.info(
@@ -36,7 +41,13 @@
     // timers and the bridge socket with it, and the connection only returns when some
     // unrelated mail event happens to wake us.
     try {
-      const alive = await browser.tbx.keepAlive(true);
+      const alive = await tbxCapabilities.bounded(
+        browser.tbx.keepAlive(true),
+        PROBE_TIMEOUT_MS
+      );
+      if (!alive) {
+        throw new Error(`no answer within ${PROBE_TIMEOUT_MS}ms`);
+      }
       tbxLog.info(
         alive.enabled
           ? `keep-alive on (every ${alive.intervalMs}ms; idle timeout ${alive.idleTimeoutMs}ms)`
@@ -54,7 +65,13 @@
     // window. It is an OptionalOnlyPermission, so it cannot be asked for in the
     // manifest and needs a click we do not have. See grantOptionalPermission.
     try {
-      const grant = await browser.tbx.grantOptionalPermission("messages.send");
+      const grant = await tbxCapabilities.bounded(
+        browser.tbx.grantOptionalPermission("messages.send"),
+        PROBE_TIMEOUT_MS
+      );
+      if (!grant) {
+        throw new Error(`no answer within ${PROBE_TIMEOUT_MS}ms`);
+      }
       if (!grant.alreadyHad) {
         tbxLog.info(`granted messages.send: ${grant.granted}`);
       }
@@ -66,18 +83,27 @@
     }
 
     try {
-      identity = {
-        capabilities: await tbxCapabilities.describe(),
-        app: await tbxCapabilities.appInfo(),
-      };
+      // Whatever these two do not answer in time stays null, and `hello` falls back
+      // to the capability snapshots instead.
+      const [capabilities, app] = await Promise.all([
+        tbxCapabilities.bounded(tbxCapabilities.describe(), PROBE_TIMEOUT_MS),
+        tbxCapabilities.bounded(tbxCapabilities.appInfo(), PROBE_TIMEOUT_MS),
+      ]);
+      identity = { app, capabilities };
       report = {
         writtenAt: new Date().toISOString(),
         addonVersion: manifest.version,
-        app: identity.app,
-        capabilities: identity.capabilities,
+        app,
+        capabilities,
         methodCount: tbxRegistry.methods().length,
       };
-      await browser.tbx.writeStatus(report);
+      const written = await tbxCapabilities.bounded(
+        browser.tbx.writeStatus(report),
+        PROBE_TIMEOUT_MS
+      );
+      if (!written) {
+        throw new Error(`no answer within ${PROBE_TIMEOUT_MS}ms`);
+      }
     } catch (ex) {
       tbxLog.warn("could not write the status file:", ex.message || ex);
     }

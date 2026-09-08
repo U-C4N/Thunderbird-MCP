@@ -31,22 +31,49 @@ function capabilityStub(overrides = {}) {
     describe: async () => ({ experiment: true, source: "async" }),
     appInfoSync: () => ({ name: "Thunderbird", version: "sync" }),
     describeSync: () => ({ experiment: true, source: "sync" }),
+    bounded: async (promise, _ms, fallback = null) => {
+      try {
+        return await promise;
+      } catch (ex) {
+        return fallback;
+      }
+    },
     ...overrides,
   };
 }
 
+/** The real capabilities module, against the same browser and clock. */
+function loadCapabilities({
+  browser = fakeBrowser(),
+  clock = fakeClock(),
+  methods = ["mail.list"],
+} = {}) {
+  const context = loadScript("background/capabilities.js", {
+    browser,
+    tbxLog: fakeLog(),
+    tbxRegistry: { methods: () => methods },
+    setTimeout: clock.setTimeout,
+    clearTimeout: clock.clearTimeout,
+    console: quietConsole(),
+  });
+  return context.tbxCapabilities;
+}
+
 /** Load transport.js with every global it touches faked. */
-function makeWorld({ pairing = PAIRING, capabilities = {} } = {}) {
-  const clock = fakeClock();
+function makeWorld({
+  pairing = PAIRING,
+  browser = fakeBrowser({ pairing }),
+  clock = fakeClock(),
+  capabilities = capabilityStub(),
+} = {}) {
   const WebSocket = fakeWebSocketClass();
   const log = fakeLog();
-  const browser = fakeBrowser({ pairing });
   const context = loadScript("background/transport.js", {
     browser,
     WebSocket,
     tbxLog: log,
     tbxRegistry: { invoke: async () => ({}), methods: () => [] },
-    tbxCapabilities: capabilityStub(capabilities),
+    tbxCapabilities: capabilities,
     setTimeout: clock.setTimeout,
     clearTimeout: clock.clearTimeout,
     setInterval: clock.setInterval,
@@ -77,10 +104,10 @@ function makeWorld({ pairing = PAIRING, capabilities = {} } = {}) {
 describe("hello", () => {
   it("goes out as soon as the socket opens, even while a probe is hanging", async () => {
     const world = makeWorld({
-      capabilities: {
+      capabilities: capabilityStub({
         appInfo: () => new Promise(() => {}),
         describe: () => new Promise(() => {}),
-      },
+      }),
     });
     const ws = await world.start({
       app: { name: "Thunderbird", version: "155.0" },
@@ -125,42 +152,47 @@ describe("hello", () => {
     assert.deepEqual(next.sent[0].capabilities, { experiment: true, source: "async" });
   });
 
-  it("keeps the identity it has when the refresh fails", async () => {
-    const world = makeWorld({
-      capabilities: {
-        appInfo: async () => {
-          throw new Error("privileged half is gone");
-        },
-      },
-    });
-    const ws = await world.start({ app: { version: "seed" }, capabilities: { source: "seed" } });
+  it("keeps the identity it has when a refresh probe stops answering", async () => {
+    // The real capabilities module, because the guarantee lives in its cache: the
+    // probes never reject, so a refresh that "fails" still returns something.
+    const clock = fakeClock();
+    const browser = fakeBrowser({ pairing: PAIRING });
+    let answering = true;
+    const probe = (value) => async () => {
+      if (!answering) {
+        throw new Error("the privileged half is not answering");
+      }
+      return value;
+    };
+    browser.tbx.appInfo = probe({ name: "Thunderbird", version: "155.0" });
+    browser.tbx.availableModules = probe(["prefs", "smtp"]);
+    const capabilities = loadCapabilities({ browser, clock });
+    // main.js probes once before starting the transport; that is what fills the cache.
+    const identity = {
+      app: await capabilities.appInfo(),
+      capabilities: await capabilities.describe(),
+    };
+    answering = false;
+
+    const world = makeWorld({ browser, clock, capabilities });
+    const ws = await world.start(identity);
     ws.open();
     ws.receive({ t: "welcome" });
-    await world.clock.advance(0);
+    await clock.advance(0); // the refresh runs, and both probes fail
 
     ws.serverClose(1006, "daemon exited");
-    await world.clock.advance(600);
+    await clock.advance(600);
     const next = world.WebSocket.instances[1];
     next.open();
 
-    assert.deepEqual(next.sent[0].app, { version: "seed" });
+    assert.deepEqual(next.sent[0].app, { name: "Thunderbird", version: "155.0" });
+    assert.deepEqual(next.sent[0].capabilities.privilegedModules, ["prefs", "smtp"]);
   });
 });
 
 describe("capability snapshots", () => {
-  function loadCapabilities() {
-    const browser = fakeBrowser();
-    const context = loadScript("background/capabilities.js", {
-      browser,
-      tbxLog: fakeLog(),
-      tbxRegistry: { methods: () => ["mail.list"] },
-      console: quietConsole(),
-    });
-    return { capabilities: context.tbxCapabilities, browser };
-  }
-
   it("appInfoSync falls back to the manifest until a probe has answered", async () => {
-    const { capabilities } = loadCapabilities();
+    const capabilities = loadCapabilities();
 
     assert.deepEqual(plain(capabilities.appInfoSync()), {
       name: "Thunderbird",
@@ -175,8 +207,34 @@ describe("capability snapshots", () => {
     });
   });
 
+  it("bounded answers with the fallback when a probe never does", async () => {
+    const clock = fakeClock();
+    const capabilities = loadCapabilities({ clock });
+    let settled = "pending";
+
+    capabilities.bounded(new Promise(() => {}), 5000, "gave up").then((value) => {
+      settled = value;
+    });
+
+    await clock.advance(4999);
+    assert.equal(settled, "pending");
+    await clock.advance(1);
+    assert.equal(settled, "gave up");
+  });
+
+  it("bounded passes an answer through, and a failure becomes the fallback", async () => {
+    const capabilities = loadCapabilities();
+
+    assert.equal(await capabilities.bounded(Promise.resolve("answer"), 5000, "no"), "answer");
+    assert.equal(
+      await capabilities.bounded(Promise.reject(new Error("wedged")), 5000, "no"),
+      "no"
+    );
+    assert.equal(await capabilities.bounded(Promise.resolve(7), 5000), 7);
+  });
+
   it("describeSync has describe()'s shape, without a probe of its own", async () => {
-    const { capabilities } = loadCapabilities();
+    const capabilities = loadCapabilities();
 
     const before = plain(capabilities.describeSync());
     assert.deepEqual(before.privilegedModules, []);
@@ -336,6 +394,39 @@ describe("retry schedule", () => {
   });
 });
 
+describe("pairing read", () => {
+  it("gives up on a read that never answers, and drops its late answer", async () => {
+    let release;
+    const hung = new Promise((resolve) => (release = resolve));
+    let reads = 0;
+    const world = makeWorld({
+      pairing: () => {
+        reads += 1;
+        return reads === 1 ? hung : PAIRING;
+      },
+    });
+
+    world.transport.start({ app: null, capabilities: null });
+    await world.clock.advance(0);
+    assert.equal(world.transport.status().connecting, true);
+
+    await world.clock.advance(5000);
+
+    assert.match(world.errors().at(-1), /readBridgeFile did not answer within 5000ms/);
+    assert.equal(world.transport.status().connecting, false);
+    assert.deepEqual(world.WebSocket.instances, []);
+
+    await world.clock.advance(500); // the first step of the failed schedule
+    assert.equal(reads, 2);
+    assert.equal(world.WebSocket.instances.length, 1);
+
+    release(PAIRING); // the read that timed out finally answers
+    await world.clock.advance(0);
+
+    assert.equal(world.WebSocket.instances.length, 1);
+  });
+});
+
 describe("supervisor", () => {
   it("leaves a pending retry alone", async () => {
     const world = makeWorld();
@@ -421,6 +512,23 @@ describe("visible state", () => {
     assert.equal(complaints(world).length, 1, "complained more than once");
   });
 
+  it("does not blame a new daemon for the last one's failures", async () => {
+    let advertised = { version: 1, port: 4711, token: "old" };
+    const world = makeWorld({ pairing: () => advertised });
+    await world.start();
+
+    await failCycle(world, 0);
+    world.WebSocket.instances.at(-1).serverClose(1006, "closed by the daemon");
+    advertised = { version: 1, port: 4712, token: "new" };
+    await world.clock.advance(1000);
+
+    assert.equal(world.WebSocket.instances.at(-1).url, "ws://127.0.0.1:4712/tbmcp");
+    world.WebSocket.instances.at(-1).serverClose(1006, "closed by the daemon");
+
+    assert.deepEqual(complaints(world), []);
+    assert.equal(world.transport.status().consecutiveFailures, 1);
+  });
+
   it("complains again only after a welcome has reset the count", async () => {
     const world = makeWorld();
     await world.start();
@@ -454,6 +562,7 @@ describe("status", () => {
 
     assert.deepEqual(plain(world.transport.status()), {
       state: "disconnected",
+      connecting: false,
       attempt: 0,
       inFlight: 0,
       consecutiveFailures: 0,
@@ -536,6 +645,36 @@ describe("startup wiring", () => {
     await settle();
     return { browser, starts };
   }
+
+  it("starts the transport even when the privileged half never answers", async () => {
+    const clock = fakeClock();
+    const browser = fakeBrowser({ pairing: PAIRING });
+    const hang = () => new Promise(() => {});
+    for (const call of ["keepAlive", "grantOptionalPermission", "appInfo", "availableModules"]) {
+      browser.tbx[call] = hang;
+    }
+    browser.tbx.writeStatus = hang;
+    const starts = [];
+    loadScript("background/main.js", {
+      browser,
+      tbxLog: fakeLog(),
+      tbxRegistry: { methods: () => ["mail.list"] },
+      tbxCapabilities: loadCapabilities({ browser, clock }),
+      tbxEvents: { start() {} },
+      tbxTransport: {
+        start: (identity, options) => starts.push({ identity, options }),
+        stop() {},
+      },
+      console: quietConsole(),
+      Date,
+    });
+
+    await settle(); // main.js gets as far as its first bounded call
+    await clock.advance(30000);
+
+    assert.equal(starts.length, 1, "the transport never started");
+    assert.deepEqual(plain(starts[0].identity), { app: null, capabilities: null });
+  });
 
   it("keeps the status file up to date as the transport changes state", async () => {
     const { browser, starts } = await bootMain();

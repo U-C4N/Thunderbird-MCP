@@ -12,13 +12,13 @@ var tbxTransport = (() => {
   const CHUNK_SIZE = 3 * 1024 * 1024; // stay under the daemon's 4 MiB frame ceiling
   /* Two schedules, because the two failure modes are nothing alike.
    *
-   * "No pairing file" is the normal resting state: no daemon has started yet. The
-   * check is a local file stat, so polling it briskly costs nothing — and backing
-   * off here is what made a freshly started daemon wait up to half a minute before
-   * anything worked.
+   * Waiting is the normal resting state: no daemon has started yet, or one that was
+   * working has gone. The check is a local file stat, so polling it briskly costs
+   * nothing — and backing off here is what made a freshly started daemon wait up to
+   * half a minute before anything worked.
    *
-   * A failed connection is different: something is listening or the port is wrong,
-   * and hammering it helps nobody. */
+   * A failed connection is different: something is listening and not completing the
+   * handshake, and hammering it helps nobody. */
   const WAIT_MS = [500, 1000, 1000, 2000, 2000];
   const BACKOFF_MS = [500, 1000, 2000, 4000, 8000, 15000, 30000];
 
@@ -41,6 +41,11 @@ var tbxTransport = (() => {
 
   /** Floor on how often the state is pushed out to whoever asked to hear about it. */
   const NOTIFY_THROTTLE_MS = 10000;
+
+  /* A read that never settles used to be terminal: nothing clears `connecting`, so
+   * no later attempt can start, and no retry was ever armed to try again. The
+   * privileged half is exactly the part that wedges, so the read gets a deadline. */
+  const PAIRING_TIMEOUT_MS = 5000;
 
   let socket = null;
   let attempt = 0;
@@ -66,6 +71,7 @@ var tbxTransport = (() => {
   let lastWelcomeAt = null;
   let onStateChange = null;
   let lastNotifyAt = 0;
+  let pairingTimer = null;
   const inFlight = new Map(); // request id -> AbortController-ish flag
 
   function state() {
@@ -89,6 +95,9 @@ var tbxTransport = (() => {
   function status() {
     return {
       state: state(),
+      // Separate from `state`, which is about the socket: this one says an attempt
+      // is waiting on the privileged half, which is where a wedge shows up first.
+      connecting,
       attempt,
       inFlight: inFlight.size,
       consecutiveFailures,
@@ -136,6 +145,36 @@ var tbxTransport = (() => {
       );
     }
     return pairing;
+  }
+
+  /**
+   * `readPairing()` with a deadline, so an attempt always ends.
+   *
+   * A late answer is dropped: this promise has already rejected, the attempt that
+   * was waiting on it has gone, and a retry is on its way — resolving now would
+   * open a second socket behind the live one.
+   */
+  function readPairingWithin(ms) {
+    return new Promise((resolve, reject) => {
+      clearTimeout(pairingTimer);
+      pairingTimer = setTimeout(() => {
+        tbxLog.error(
+          `readBridgeFile did not answer within ${ms}ms — the privileged half of the ` +
+            "add-on is not responding; `tbmcp doctor` shows the daemon's view"
+        );
+        reject(new Error(`readBridgeFile did not answer within ${ms}ms`));
+      }, ms);
+      readPairing().then(
+        (pairing) => {
+          clearTimeout(pairingTimer);
+          resolve(pairing);
+        },
+        (ex) => {
+          clearTimeout(pairingTimer);
+          reject(ex);
+        }
+      );
+    });
   }
 
   function send(message) {
@@ -309,7 +348,7 @@ var tbxTransport = (() => {
   async function attemptConnection() {
     let pairing;
     try {
-      pairing = await readPairing();
+      pairing = await readPairingWithin(PAIRING_TIMEOUT_MS);
     } catch (ex) {
       const message = String(ex.message || ex);
       // No pairing file is the resting state, not a failure: poll, do not back off.
@@ -317,12 +356,13 @@ var tbxTransport = (() => {
       return;
     }
 
-    // A daemon we have not tried before gets both schedules back at zero: after a
-    // long stretch with no daemon the counters sit at their ceiling, and a freshly
-    // written pairing file would otherwise not be acted on for half a minute.
+    // A daemon we have not tried before starts with a clean slate: after a long
+    // stretch with no daemon the counters sit at their ceiling, and a freshly
+    // written pairing file would otherwise not be acted on for half a minute — or
+    // would be blamed, on its first close, for the previous daemon's failures.
     //
-    // The same file we have been failing against does not get that: it is the one
-    // that used to leave us reconnecting every half second for as long as
+    // The same file we have been failing against gets no such reprieve: it is the
+    // one that used to leave us reconnecting every half second for as long as
     // Thunderbird stayed up.
     if (
       !lastPairing ||
@@ -331,6 +371,7 @@ var tbxTransport = (() => {
     ) {
       waits = 0;
       attempt = 0;
+      consecutiveFailures = 0;
     }
     lastPairing = { port: pairing.port, token: pairing.token };
 
@@ -429,9 +470,10 @@ var tbxTransport = (() => {
       notify(false);
 
       // A rejected token (4001) nearly always means the daemon we paired with has been
-      // replaced and the file we read is stale — not that the install is broken. So
-      // re-read and try again promptly, and only complain after several rounds have
-      // failed with the file we just read.
+      // replaced and the file we read is stale — not that the install is broken. The
+      // next attempt re-reads the file, and a file that has changed resets the
+      // counters, so a replacement daemon is reached quickly; only a run of
+      // rejections against the file we keep reading is worth complaining about.
       if (code === 4001) {
         rejections += 1;
         if (rejections >= 4) {
@@ -446,13 +488,8 @@ var tbxTransport = (() => {
         rejections = 0;
       }
 
-      // Almost every other close means the daemon went away: it exited on its idle
-      // timer (1000/1001), was superseded (1012), or its process died and took the
-      // socket with it (1006). In all of those the right response is to poll for a new
-      // pairing file, not to back off — the next daemon may be seconds away and the
-      // check is a local file stat.
-      //
-      // Only a protocol mismatch is worth backing off for: that will not fix itself.
+      // A protocol mismatch will not fix itself, so say so rather than retrying
+      // quietly for the rest of the session.
       if (code === 4002) {
         tbxLog.error(
           `daemon rejected the connection (code ${code}: ${event && event.reason}). ` +
@@ -460,9 +497,19 @@ var tbxTransport = (() => {
             "`tbmcp install-addon`."
         );
       }
-      // Which schedule applies is decided by how far this socket got, not by the
-      // code: a socket that never reached `welcome` means the daemon is there and
-      // not talking to us, and polling that every half second helps nobody.
+      /* Which schedule applies is decided by how far this socket got, not by the
+       * code it closed with:
+       *
+       * - never welcomed: something is listening and not talking to us, whatever it
+       *   says on the way out, so back off (BACKOFF_MS) instead of dialling it every
+       *   half second for as long as Thunderbird is up;
+       * - welcomed, then closed: the daemon went away — it exited on its idle timer
+       *   (1000/1001), was superseded (1012), or died with the socket (1006) — and
+       *   the next one may be seconds away, so poll (WAIT_MS); the check is a local
+       *   file stat and costs nothing.
+       *
+       * Either way, a pairing file that has changed resets both counters, so a new
+       * daemon never waits out the previous one's backoff (see attemptConnection). */
       scheduleRetry(`closed ${code}`, hadWelcome ? "waiting" : "failed");
     };
   }
@@ -534,6 +581,7 @@ var tbxTransport = (() => {
       stopped = true;
       clearTimeout(retryTimer);
       retryTimer = null;
+      clearTimeout(pairingTimer);
       clearTimeout(helloTimer);
       clearTimeout(connectTimer);
       clearInterval(supervisor);

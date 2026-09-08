@@ -56,6 +56,32 @@ var tbxCapabilities = (() => {
   }
 
   return {
+    /**
+     * `promise`, but it always settles, and never with a rejection.
+     *
+     * Anything that crosses into the privileged half can hang — that is the failure
+     * this add-on keeps meeting — and a startup step that hangs takes the bridge
+     * with it, because nothing after it ever runs. Callers get `fallback` instead
+     * and carry on with what they already know.
+     *
+     * @param {Promise} promise
+     * @param {number} ms  how long the caller is prepared to wait.
+     * @param {*} [fallback]  what to resolve with when it does not answer.
+     */
+    bounded(promise, ms, fallback = null) {
+      return new Promise((resolve) => {
+        const timer = setTimeout(() => resolve(fallback), ms);
+        const settle = (value) => {
+          clearTimeout(timer);
+          resolve(value);
+        };
+        promise.then(settle, (ex) => {
+          tbxLog.debug("a privileged call failed:", ex.message || ex);
+          settle(fallback);
+        });
+      });
+    },
+
     async appInfo() {
       if (browser.tbx) {
         try {
@@ -65,8 +91,11 @@ var tbxCapabilities = (() => {
           tbxLog.debug("appInfo failed:", ex.message || ex);
         }
       }
-      lastAppInfo = manifestAppInfo();
-      return lastAppInfo;
+      // The cache is only written by an answer. A probe that failed must not be
+      // able to downgrade what we already know — the transport re-probes after
+      // every welcome, and a wedged privileged half would otherwise turn a good
+      // `hello` into one claiming this is Thunderbird "unknown".
+      return lastAppInfo || manifestAppInfo();
     },
 
     /** The last answer `appInfo()` produced, or the manifest before there was one. */
@@ -79,11 +108,9 @@ var tbxCapabilities = (() => {
         try {
           lastPrivilegedModules = await browser.tbx.availableModules();
         } catch (ex) {
+          // Same as above: keep the last list we were actually given.
           tbxLog.warn("the privileged half loaded but is not answering:", ex.message || ex);
-          lastPrivilegedModules = [];
         }
-      } else {
-        lastPrivilegedModules = [];
       }
       return snapshot(lastPrivilegedModules);
     },
