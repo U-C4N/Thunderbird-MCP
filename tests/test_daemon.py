@@ -18,12 +18,15 @@ import json
 import logging
 import os
 import time
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 import pytest
 from websockets.asyncio.client import connect as ws_connect
 from websockets.exceptions import ConnectionClosed
 
 from tbmcp import ipc
+from tbmcp.cli import build_parser, cmd_daemon
 from tbmcp.daemon import Daemon, run_daemon
 from tbmcp.errors import NotConnectedError
 from tbmcp.profile import BRIDGE_FILE, ThunderbirdProfile
@@ -359,3 +362,38 @@ class TestHandshakeTelemetry:
 
         assert not (isolated_state / BRIDGE_FILE).exists()
         assert not ipc.DaemonInfo.path().exists()
+
+
+# ------------------------------------------------------------- the daemon's log
+#
+# The daemon is spawned detached with stdout and stderr on DEVNULL, so until now
+# everything it logged went nowhere: not the handshake failures, not a stand-down,
+# not the reason it exited. `doctor` prints the path this test pins.
+
+
+def test_the_daemon_command_opens_a_log_file_it_can_be_read_back_from(
+    isolated_state, monkeypatch, caplog
+) -> None:
+    async def _run(*_args, **_kwargs) -> int:
+        return 0
+
+    monkeypatch.setattr("tbmcp.daemon.run_daemon", _run)
+    caplog.set_level(logging.INFO)
+    root = logging.getLogger()
+    before = list(root.handlers)
+    try:
+        assert cmd_daemon(build_parser().parse_args(["daemon"])) == 0
+
+        added = [handler for handler in root.handlers if handler not in before]
+        assert len(added) == 1, "exactly one log file handler belongs on the root logger"
+        assert isinstance(added[0], RotatingFileHandler), "an unbounded log fills the disk"
+        log_file = isolated_state / "tbmcp" / "daemon.log"
+        assert Path(added[0].baseFilename) == log_file
+
+        logging.getLogger("tbmcp.daemon").info("the add-on never said hello")
+        added[0].flush()
+        assert "the add-on never said hello" in log_file.read_text(encoding="utf-8")
+    finally:
+        for handler in [h for h in root.handlers if h not in before]:
+            root.removeHandler(handler)
+            handler.close()

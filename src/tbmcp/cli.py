@@ -22,15 +22,44 @@ from collections.abc import Sequence
 from .config import ALL_TOOLSETS, Settings, parse_toolsets
 from .handshake import describe_handshake
 
+LOG_FORMAT = "%(asctime)s %(levelname)-7s %(name)s: %(message)s"
+
 
 def _configure_logging(verbose: bool) -> None:
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.INFO,
         stream=sys.stderr,
-        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+        format=LOG_FORMAT,
     )
     # websockets logs every frame at DEBUG; that is never what we want.
     logging.getLogger("websockets").setLevel(logging.WARNING)
+
+
+def _attach_log_file(path) -> None:
+    """Also write the log to `path`, so the daemon's side of a failure survives.
+
+    The daemon is spawned detached with all three streams on DEVNULL, which meant
+    everything it logged — a handshake that never completed, a stand-down, the
+    reason it exited — was discarded as it was written, and the only account of a
+    broken bridge was whatever the add-on managed to leave in the profile.
+
+    Called after `_configure_logging`, which sets the root level: a handler added
+    first would also stop `basicConfig` configuring stderr at all.
+    """
+    from logging.handlers import RotatingFileHandler
+
+    from . import ipc
+
+    try:
+        handler = RotatingFileHandler(path, maxBytes=512_000, backupCount=2, encoding="utf-8")
+    except OSError as exc:
+        # A log we cannot open is not a reason to refuse to run.
+        logging.getLogger("tbmcp").warning("cannot write the daemon log %s: %s", path, exc)
+        return
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(logging.Formatter(LOG_FORMAT))
+    logging.getLogger().addHandler(handler)
+    ipc._restrict_permissions(path)
 
 
 def _settings_from_args(args: argparse.Namespace) -> Settings:
@@ -69,7 +98,9 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
 def cmd_daemon(args: argparse.Namespace) -> int:
     from .daemon import run_daemon
+    from .ipc import daemon_log_path
 
+    _attach_log_file(daemon_log_path())
     return asyncio.run(run_daemon(args.profile, idle_timeout=args.idle_timeout, force=args.force))
 
 
