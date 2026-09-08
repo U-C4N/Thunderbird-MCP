@@ -71,8 +71,8 @@ var tbxTransport = (() => {
   let lastWelcomeAt = null;
   let onStateChange = null;
   let lastNotifyAt = 0;
-  let pairingTimer = null;
   const inFlight = new Map(); // request id -> AbortController-ish flag
+  const pairingTimers = new Set(); // deadlines of reads still outstanding
 
   function state() {
     if (!socket) {
@@ -150,30 +150,36 @@ var tbxTransport = (() => {
   /**
    * `readPairing()` with a deadline, so an attempt always ends.
    *
-   * A late answer is dropped: this promise has already rejected, the attempt that
-   * was waiting on it has gone, and a retry is on its way — resolving now would
-   * open a second socket behind the live one.
+   * Everything here belongs to this one call. A read we gave up on can still answer
+   * later, by which time the next attempt is waiting on a deadline of its own — and
+   * a late answer that reached for a shared timer would disarm that one, which is
+   * the hang this deadline exists to prevent. So the late answer clears its own
+   * timer, sees that its call is over, and goes no further.
    */
   function readPairingWithin(ms) {
     return new Promise((resolve, reject) => {
-      clearTimeout(pairingTimer);
-      pairingTimer = setTimeout(() => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        settled = true;
+        pairingTimers.delete(timer);
         tbxLog.error(
           `readBridgeFile did not answer within ${ms}ms — the privileged half of the ` +
             "add-on is not responding; `tbmcp doctor` shows the daemon's view"
         );
         reject(new Error(`readBridgeFile did not answer within ${ms}ms`));
       }, ms);
-      readPairing().then(
-        (pairing) => {
-          clearTimeout(pairingTimer);
-          resolve(pairing);
-        },
-        (ex) => {
-          clearTimeout(pairingTimer);
-          reject(ex);
+      pairingTimers.add(timer);
+
+      const answer = (settleWith) => (value) => {
+        clearTimeout(timer);
+        pairingTimers.delete(timer);
+        if (settled) {
+          return; // the deadline already answered for this call
         }
-      );
+        settled = true;
+        settleWith(value);
+      };
+      readPairing().then(answer(resolve), answer(reject));
     });
   }
 
@@ -581,7 +587,10 @@ var tbxTransport = (() => {
       stopped = true;
       clearTimeout(retryTimer);
       retryTimer = null;
-      clearTimeout(pairingTimer);
+      for (const timer of pairingTimers) {
+        clearTimeout(timer);
+      }
+      pairingTimers.clear();
       clearTimeout(helloTimer);
       clearTimeout(connectTimer);
       clearInterval(supervisor);

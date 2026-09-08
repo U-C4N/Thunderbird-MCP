@@ -395,6 +395,34 @@ describe("retry schedule", () => {
 });
 
 describe("pairing read", () => {
+  it("keeps each read's deadline to itself", async () => {
+    const hung = [];
+    const world = makeWorld({ pairing: () => new Promise((resolve) => hung.push(resolve)) });
+
+    world.transport.start({ app: null, capabilities: null });
+    await world.clock.advance(0);
+    assert.equal(hung.length, 1);
+
+    await world.clock.advance(5000); // the first read is given up on
+    assert.equal(world.errors().length, 1);
+    assert.equal(world.transport.status().connecting, false);
+
+    await world.clock.advance(500); // and the retry starts a second one
+    assert.equal(hung.length, 2);
+    assert.equal(world.transport.status().connecting, true);
+
+    hung[0](PAIRING); // the abandoned read answers while the second is still waiting
+    await world.clock.advance(0);
+    assert.deepEqual(world.WebSocket.instances, []);
+
+    await world.clock.advance(5000); // the second read's own deadline must still land
+
+    assert.equal(world.errors().length, 2, "the late answer disarmed the live watchdog");
+    assert.equal(world.transport.status().connecting, false);
+    await world.clock.advance(1000);
+    assert.equal(hung.length, 3);
+  });
+
   it("gives up on a read that never answers, and drops its late answer", async () => {
     let release;
     const hung = new Promise((resolve) => (release = resolve));
