@@ -15,9 +15,12 @@ import json
 import logging
 import os
 import sys
+import textwrap
+import time
 from collections.abc import Sequence
 
 from .config import ALL_TOOLSETS, Settings, parse_toolsets
+from .handshake import describe_handshake
 
 
 def _configure_logging(verbose: bool) -> None:
@@ -124,10 +127,34 @@ def _doctor_ok(report: dict) -> bool:
     return bridge_ok and tool_ok
 
 
+def _addon_version_check(report: dict) -> dict:
+    """The add-on Thunderbird is running, against the one this package ships.
+
+    Three sources: what the live session announced, what the add-on wrote into the
+    profile at startup, and the manifest in this source tree. A connected older
+    add-on is still a working chain — `_doctor_ok` deliberately ignores this — but
+    it is the first thing to fix when anything else is wrong, because every other
+    remedy assumes the two halves came out of the same package.
+    """
+    status = report.get("addonStatus")
+    installed = None
+    if isinstance(status, dict) and not status.get("error"):
+        installed = status.get("addonVersion")
+    live = ((report.get("bridge") or {}).get("thunderbird") or {}).get("addonVersion")
+    source = (report.get("addon") or {}).get("addonVersion")
+    running = live or installed
+    return {
+        "installed": installed,
+        "live": live,
+        "source": source,
+        "mismatch": bool(source and running and running != source),
+    }
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     from . import addon_install
     from .bridge import Bridge, set_shared_bridge
-    from .ipc import DaemonInfo
+    from .ipc import DaemonInfo, daemon_log_path
     from .profile import ProfileSnapshot, find_profile, list_profiles
     from .server import build_server
 
@@ -163,6 +190,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     report["daemon"] = (
         {"running": True, "pid": info.pid, "port": info.port} if info else {"running": False}
     )
+    # The daemon is spawned detached onto DEVNULL, so this file is the only place
+    # its side of a failure survives.
+    report["daemon"]["logFile"] = str(daemon_log_path())
 
     async def probe() -> None:
         bridge = Bridge(profile_hint=settings.profile, autostart=not args.no_start)
@@ -204,6 +234,14 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     asyncio.run(probe())
 
+    # Both derived from what is already in the report, once the probe has filled in
+    # the live half: which add-on is actually running, and the add-on's own account
+    # of its connection attempts.
+    report["addonVersions"] = _addon_version_check(report)
+    status_report = report.get("addonStatus")
+    if isinstance(status_report, dict) and isinstance(status_report.get("transport"), dict):
+        report["addonTransport"] = status_report["transport"]
+
     report["toolsets"] = {
         "selected": list(settings.toolsets),
         "available": list(ALL_TOOLSETS),
@@ -222,9 +260,46 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def _handshake_line(summary: dict | None) -> str:
+    """The Bridge section's account of what the add-on's connections did.
+
+    "Nothing has dialled in" and "it has dialled in three times and failed every
+    time" are opposite problems that used to print identically.
+    """
+    attempts = int((summary or {}).get("attempts") or 0)
+    if not summary or not attempts:
+        return "none since the daemon started"
+    parts = [f"{attempts} attempt{'' if attempts == 1 else 's'}"]
+    outcome = summary.get("lastOutcome")
+    if outcome:
+        at = summary.get("lastAttemptAt")
+        ago = f" {time.time() - at:.0f} s ago" if isinstance(at, int | float) else ""
+        parts.append(f"last {outcome}{ago}")
+    agent = summary.get("lastUserAgent")
+    return "; ".join(parts) + (f" ({agent})" if agent else "")
+
+
+def _transport_line(transport: dict) -> str:
+    """The add-on's own side of the same story, from the file it writes at startup."""
+    parts = [str(transport.get("state") or "unknown")]
+    failures = transport.get("consecutiveFailures")
+    if failures is not None:
+        parts.append(f"{failures} failed attempt{'' if failures == 1 else 's'}")
+    if transport.get("lastCloseCode") is not None:
+        parts.append(f"last close {transport['lastCloseCode']} at {transport.get('lastCloseAt')}")
+    return "; ".join(parts)
+
+
 def _print_doctor(report: dict) -> None:
     def line(label: str, value: object) -> None:
         print(f"  {label:<26} {value}")
+
+    def paragraph(text: str) -> None:
+        """One wrapped bullet, for a diagnosis too long to fit on a line."""
+        wrapped = textwrap.wrap(text, 76) or [text]
+        print(f"  * {wrapped[0]}")
+        for extra in wrapped[1:]:
+            print(f"    {extra}")
 
     print("thunderbird-mcp doctor\n")
     print("Python")
@@ -236,6 +311,8 @@ def _print_doctor(report: dict) -> None:
     line("executable", addon.get("thunderbirdExe") or "NOT FOUND")
     line("running", addon.get("thunderbirdRunning"))
     line("add-on version (source)", addon.get("addonVersion"))
+    versions = report.get("addonVersions") or {}
+    line("add-on version (installed)", versions.get("installed") or "unknown")
     line("profile", report.get("profileSelected") or "NOT FOUND")
     if report.get("accountsOnDisk") is not None:
         line("accounts (from prefs.js)", report["accountsOnDisk"])
@@ -257,6 +334,7 @@ def _print_doctor(report: dict) -> None:
     print("\nBridge")
     daemon = report.get("daemon") or {}
     line("daemon", f"pid {daemon.get('pid')}" if daemon.get("running") else "not running")
+    line("daemon log", daemon.get("logFile") or "unknown")
     bridge = report.get("bridge") or {}
     if bridge.get("error"):
         line("status", f"ERROR: {bridge['error']}")
@@ -268,6 +346,10 @@ def _print_doctor(report: dict) -> None:
             line("privileged half", tb.get("experiment"))
             app = tb.get("app") or {}
             line("app", f"{app.get('name')} {app.get('version')}")
+    line("add-on handshakes", _handshake_line(bridge.get("handshake")))
+    transport = report.get("addonTransport")
+    if transport:
+        line("add-on transport", _transport_line(transport))
 
     tool_call = report.get("tbStatusCall") or {}
     if tool_call.get("skipped"):
@@ -283,20 +365,37 @@ def _print_doctor(report: dict) -> None:
     line("read-only", tools.get("readOnly"))
     line("send mode", tools.get("sendMode"))
 
+    if bridge.get("connected") and versions.get("mismatch"):
+        seen = versions.get("live") or versions.get("installed")
+        print(f"\nWarning: installed add-on is {seen}, source is {versions.get('source')} — run")
+        print("         `tbmcp install-addon` and restart Thunderbird to update it.")
+
     if not bridge.get("connected"):
         print("\nNot connected. In order, check:")
         if not addon.get("thunderbirdRunning"):
             print("  * Thunderbird is not running — start it.")
-        elif report.get("addonStatus") is None:
-            print("  * The add-on never wrote its startup report, so either it is not")
-            print("    installed or its privileged half failed to load.")
-            print("    Install or reinstall it:  tbmcp install-addon")
-        elif not (bridge.get("thunderbird") or {}):
-            print("  * The add-on started but has not dialled in yet. It polls for the")
-            print("    pairing file about once a second; try again in a moment.")
-        elif not (bridge.get("thunderbird") or {}).get("experiment"):
-            print("  * The privileged half did not load; settings tools will fail.")
-            print("    Reinstall:  tbmcp install-addon")
+        else:
+            # A stale add-on is worth saying whatever else is wrong: it is often the
+            # cause, and every remedy below assumes the two halves match.
+            if versions.get("mismatch"):
+                seen = versions.get("live") or versions.get("installed")
+                print(f"  * The installed add-on is {seen}, source is {versions.get('source')}.")
+                print("    Run `tbmcp install-addon` and restart Thunderbird.")
+            failures = describe_handshake(bridge.get("handshake"))
+            if failures:
+                # It has dialled in, repeatedly. Anything below would be a guess that
+                # the record already contradicts.
+                paragraph(failures)
+            elif report.get("addonStatus") is None:
+                print("  * The add-on never wrote its startup report, so either it is not")
+                print("    installed or its privileged half failed to load.")
+                print("    Install or reinstall it:  tbmcp install-addon")
+            elif not (bridge.get("thunderbird") or {}):
+                print("  * The add-on started but has not dialled in yet. It polls for the")
+                print("    pairing file about once a second; try again in a moment.")
+            elif not (bridge.get("thunderbird") or {}).get("experiment"):
+                print("  * The privileged half did not load; settings tools will fail.")
+                print("    Reinstall:  tbmcp install-addon")
 
 
 def cmd_setup(args: argparse.Namespace) -> int:
