@@ -113,7 +113,7 @@ class Bridge:
             if info is None:
                 raise TransportError("the daemon vanished right after starting", code="NO_DAEMON")
 
-        reader, writer = await asyncio.open_connection("127.0.0.1", info.port)
+        reader, writer = await asyncio.open_connection("127.0.0.1", info.port, limit=ipc.MAX_LINE)
         self._next_id += 1
         await ipc.write_message(writer, {"t": "auth", "id": self._next_id, "token": info.token})
         reply = await asyncio.wait_for(ipc.read_message(reader), timeout=10.0)

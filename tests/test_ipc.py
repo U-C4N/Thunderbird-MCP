@@ -1,14 +1,20 @@
-"""Daemon advertisement and line framing."""
+"""Daemon advertisement, line framing, and the size a frame is allowed to be."""
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import os
+import time
 
 import pytest
 
 from tbmcp import ipc
+from tbmcp.bridge import Bridge
+from tbmcp.daemon import Daemon
 from tbmcp.errors import TransportError
+from tbmcp.profile import ThunderbirdProfile
 
 pytestmark = pytest.mark.anyio
 
@@ -121,3 +127,141 @@ async def test_write_then_read_round_trip() -> None:
     frame = {"t": "req", "id": 7, "method": "prefs.get", "params": {"name": "a.b"}}
     await ipc.write_message(writer, frame)
     assert await ipc.read_message(_Reader(b"".join(writer.chunks))) == frame
+
+
+# ------------------------------------------------------------------ the size ceiling
+#
+# `MAX_LINE` named the ceiling, but neither end passed it to asyncio, so what a frame
+# really had to fit in was asyncio's 64 KiB default. Past it `readline()` raised a bare
+# `ValueError`, the bridge's read loop died, and a wide search result — 200 hits, about
+# 64 KB of JSON — wedged the connection for every later call.
+
+
+async def test_read_message_reports_a_frame_the_buffer_cannot_hold() -> None:
+    """Unhandled, that `ValueError` failed every pending call as a plain disconnect,
+    which points the reader at the network instead of at the size."""
+
+    async def flood(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        with contextlib.suppress(OSError):
+            writer.write(b"x" * 300_000)  # no newline, so it can never be framed
+            await writer.drain()
+        writer.close()
+
+    async with await asyncio.start_server(flood, host="127.0.0.1", port=0) as server:
+        port = server.sockets[0].getsockname()[1]
+        reader, writer = await asyncio.open_connection("127.0.0.1", port, limit=1024)
+        try:
+            with pytest.raises(TransportError) as caught:
+                await ipc.read_message(reader)
+        finally:
+            writer.close()
+    assert caught.value.code == "TOO_LARGE"
+
+
+async def test_a_large_frame_survives_when_both_ends_agree_on_the_limit() -> None:
+    frame = {"t": "res", "id": 1, "ok": True, "result": {"body": "m" * 200_000}}
+
+    async def send_one(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        with contextlib.suppress(OSError):
+            await ipc.write_message(writer, frame)
+        writer.close()
+
+    async with await asyncio.start_server(
+        send_one, host="127.0.0.1", port=0, limit=ipc.MAX_LINE
+    ) as server:
+        port = server.sockets[0].getsockname()[1]
+        reader, writer = await asyncio.open_connection("127.0.0.1", port, limit=ipc.MAX_LINE)
+        try:
+            assert await ipc.read_message(reader) == frame
+        finally:
+            writer.close()
+
+
+@pytest.fixture
+def isolated_state(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    ipc.DaemonInfo.clear()
+    yield tmp_path
+    ipc.DaemonInfo.clear()
+
+
+async def test_a_large_result_reaches_the_caller(isolated_state) -> None:
+    """The live failure, end to end: 200 search hits came back, the bridge's reader
+    gave up mid-frame, and the call — plus every other one in flight — died as
+    DISCONNECTED."""
+    result = {"messages": [{"subject": "invoice", "preview": "x" * 1000} for _ in range(200)]}
+
+    async def daemon(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        with contextlib.suppress(Exception):
+            while True:
+                message = await ipc.read_message(reader)
+                if message is None:
+                    return
+                if message.get("t") == "auth":
+                    await ipc.write_message(writer, {"t": "ready", "id": message["id"]})
+                    continue
+                await ipc.write_message(
+                    writer, {"t": "res", "id": message["id"], "ok": True, "result": result}
+                )
+
+    async with await asyncio.start_server(
+        daemon, host="127.0.0.1", port=0, limit=ipc.MAX_LINE
+    ) as server:
+        ipc.DaemonInfo(
+            version=ipc.PROTOCOL_VERSION,
+            port=server.sockets[0].getsockname()[1],
+            token="t",
+            pid=os.getpid(),
+            profile="",
+        ).write()
+        bridge = Bridge(autostart=False)
+        try:
+            # `daemon.status` is answered by the daemon itself, so nothing waits for
+            # Thunderbird to attach.
+            assert await bridge.call("daemon.status", timeout=10.0) == result
+        finally:
+            await bridge.close()
+
+
+async def test_a_large_request_reaches_the_daemon(isolated_state) -> None:
+    """The other direction: a mail_send carrying an attachment is a big frame too."""
+    profile = ThunderbirdProfile(
+        path=isolated_state, name="test", is_default=True, root=isolated_state
+    )
+    daemon = Daemon(profile, idle_timeout=0)
+    running = asyncio.create_task(daemon.run())
+    try:
+        info = await _advertised_daemon()
+        reader, writer = await asyncio.open_connection("127.0.0.1", info.port, limit=ipc.MAX_LINE)
+        try:
+            await ipc.write_message(writer, {"t": "auth", "id": 1, "token": info.token})
+            ready = await asyncio.wait_for(ipc.read_message(reader), timeout=5.0)
+            assert ready is not None and ready["t"] == "ready"
+            await ipc.write_message(
+                writer,
+                {
+                    "t": "req",
+                    "id": 2,
+                    "method": "daemon.status",
+                    "params": {"attachment": "p" * 200_000},
+                    "timeout": 5.0,
+                },
+            )
+            reply = await asyncio.wait_for(ipc.read_message(reader), timeout=5.0)
+            assert reply is not None and reply["ok"], reply
+        finally:
+            writer.close()
+    finally:
+        daemon._stop.set()
+        await asyncio.wait_for(running, timeout=10.0)
+
+
+async def _advertised_daemon() -> ipc.DaemonInfo:
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        info = ipc.DaemonInfo.load()
+        if info is not None:
+            return info
+        await asyncio.sleep(0.05)
+    raise AssertionError("the daemon never advertised itself")
