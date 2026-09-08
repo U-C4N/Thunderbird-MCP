@@ -84,6 +84,8 @@ was verified against Thunderbird 155.
   XPCOM surfaces. 111 tests, run in CI.
 - `tools/smoke_search.py`, a read-only live acceptance run for the search tools.
 - CI covers Python 3.14; Thunderbird 155 is the verified version.
+- `TBMCP_STATE_DIR` overrides where the daemon keeps its advertisement, lock and log
+  on every platform (macOS had no environment variable for it at all).
 
 ### Changed
 

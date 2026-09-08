@@ -22,8 +22,17 @@ MAX_LINE = 64 * 1024 * 1024  # a raw message body can legitimately be large
 
 
 def state_dir() -> Path:
-    """Per-user directory for the daemon advertisement and lock."""
-    if sys.platform == "win32":
+    """Per-user directory for the daemon advertisement, lock and log.
+
+    `TBMCP_STATE_DIR` overrides the platform default on every platform. macOS has
+    no conventional environment variable for this directory, so without an
+    explicit override there is no way for a test — or a CI job — to keep the
+    daemon's files out of the user's real ~/Library.
+    """
+    override = os.environ.get("TBMCP_STATE_DIR")
+    if override:
+        base = override
+    elif sys.platform == "win32":
         base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
     elif sys.platform == "darwin":
         base = str(Path.home() / "Library" / "Application Support")

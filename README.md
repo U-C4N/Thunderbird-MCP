@@ -507,7 +507,8 @@ active, is itself the diagnosis.
 | Claude Code truncates a large result | raise `MAX_MCP_OUTPUT_TOKENS` (default 25,000) |
 | A dependency fails with "DLL load failed" or "cannot open shared object file" | A binary your OS will not load — Windows Application Control blocks unsigned, low-reputation wheels. `bootstrap` detects this and downgrades the offending package automatically; run `python bootstrap.py` and read the `binaries` step. |
 
-`TBMCP_DEBUG=1` turns on verbose logging to stderr. The add-on logs to Thunderbird's
+`TBMCP_DEBUG=1` turns on verbose logging to stderr. `TBMCP_STATE_DIR` moves the
+daemon's advertisement, lock and log out of the platform default. The add-on logs to Thunderbird's
 error console with a `[tbmcp]` prefix, and `tb_console` returns those lines as a tool.
 `tb_console` also includes the add-on's own `console.*` output, which the error
 console window does not show.

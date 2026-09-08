@@ -22,6 +22,7 @@ pytestmark = pytest.mark.anyio
 def test_daemon_info_round_trip(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    monkeypatch.setenv("TBMCP_STATE_DIR", str(tmp_path))
     info = ipc.DaemonInfo(
         version=ipc.PROTOCOL_VERSION,
         port=51234,
@@ -42,6 +43,7 @@ def test_a_dead_pid_is_treated_as_no_daemon(tmp_path, monkeypatch) -> None:
     """Otherwise every `serve` would try to talk to a port nobody is listening on."""
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    monkeypatch.setenv("TBMCP_STATE_DIR", str(tmp_path))
     ipc.DaemonInfo(
         version=ipc.PROTOCOL_VERSION, port=1, token="x", pid=0x7FFFFFFF, profile=""
     ).write()
@@ -51,6 +53,7 @@ def test_a_dead_pid_is_treated_as_no_daemon(tmp_path, monkeypatch) -> None:
 def test_a_wrong_protocol_version_is_ignored(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    monkeypatch.setenv("TBMCP_STATE_DIR", str(tmp_path))
     ipc.DaemonInfo(
         version=ipc.PROTOCOL_VERSION + 99, port=1, token="x", pid=os.getpid(), profile=""
     ).write()
@@ -60,6 +63,7 @@ def test_a_wrong_protocol_version_is_ignored(tmp_path, monkeypatch) -> None:
 def test_corrupt_advertisement_is_ignored(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    monkeypatch.setenv("TBMCP_STATE_DIR", str(tmp_path))
     ipc.DaemonInfo.path().write_text("{not json", encoding="utf-8")
     assert ipc.DaemonInfo.load() is None
 
@@ -181,6 +185,7 @@ async def test_a_large_frame_survives_when_both_ends_agree_on_the_limit() -> Non
 def isolated_state(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    monkeypatch.setenv("TBMCP_STATE_DIR", str(tmp_path))
     ipc.DaemonInfo.clear()
     yield tmp_path
     ipc.DaemonInfo.clear()
@@ -321,3 +326,13 @@ async def test_the_read_loop_closes_the_writer_it_can_no_longer_read_for() -> No
     bridge._reader.feed_eof()
     await bridge._read_loop()
     assert writer.is_closing()
+
+
+def test_state_dir_honours_an_explicit_override_on_every_platform(tmp_path, monkeypatch):
+    """macOS reads no environment variable at all, so a test that pointed
+    LOCALAPPDATA/XDG_STATE_HOME at a temp dir still wrote into the runner's real
+    ~/Library — which is how the daemon-log test failed on the macOS runner only.
+    One explicit override, honoured everywhere, is what CI and tests need."""
+    monkeypatch.setenv("TBMCP_STATE_DIR", str(tmp_path / "override"))
+    assert ipc.state_dir() == tmp_path / "override" / "tbmcp"
+    assert (tmp_path / "override" / "tbmcp").is_dir()

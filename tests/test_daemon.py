@@ -38,6 +38,7 @@ pytestmark = pytest.mark.anyio
 def isolated_state(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    monkeypatch.setenv("TBMCP_STATE_DIR", str(tmp_path))
     ipc.DaemonInfo.clear()
     yield tmp_path
     ipc.DaemonInfo.clear()
