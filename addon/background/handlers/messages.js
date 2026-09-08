@@ -96,6 +96,32 @@
     return typeof first === "string" ? browser.messages.continueList(first) : first;
   }
 
+  /** A folder or account id, or a list of them, as a list — or null for neither. */
+  function idList(value) {
+    if (!value) {
+      return null;
+    }
+    return Array.isArray(value) ? [...value] : [value];
+  }
+
+  /**
+   * What the search was aimed at, echoed back so the answer says what it covered
+   * without anyone having to enumerate folders to find out.
+   */
+  function queryScope(query) {
+    const folderIds = idList(query.folderId);
+    const accountIds = idList(query.accountId);
+    return {
+      folderIds,
+      accountIds,
+      // There is nothing to recurse into unless a folder or account was named.
+      includeSubFolders:
+        typeof query.includeSubFolders === "boolean"
+          ? query.includeSubFolders
+          : Boolean(folderIds || accountIds),
+    };
+  }
+
   tbxRegistry.define("messages.query", async (params) => {
     const limit = params.limit || DEFAULT_LIMIT;
     const query = Object.assign({}, params.query || {});
@@ -107,6 +133,10 @@
     const list = await resumeOrStart(params.cursor, () => startQuery(query));
     const paged = await takePage(list, limit);
     const result = { messages: paged.messages, cursor: paged.cursor };
+    if (!params.cursor) {
+      // Only on the first page: a continuation is by definition the same search.
+      result.scope = queryScope(query);
+    }
     if (query.fullText && browser.tbx) {
       // Worth saying: fullText only sees what the global indexer has processed.
       const indexed = await browser.tbx.globalIndexEnabled().catch(() => null);

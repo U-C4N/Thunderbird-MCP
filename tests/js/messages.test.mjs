@@ -111,4 +111,62 @@ describe("messages.query", () => {
 
     assert.deepEqual(ids(result), [100, 101, 102, 103, 104]);
   });
+
+  it("echoes the scope the query named, defaulting to sub-folders included", async () => {
+    const messages = fakeMessages({ folders: { [FOLDER]: sample(30) }, queryPageSize: 10 });
+    const query = loadHandlers(messages).get("messages.query");
+
+    const result = await query({ query: { subject: "Re", folderId: FOLDER }, limit: 5 });
+
+    assert.ok(result.scope, "a first page says what it searched");
+    assert.deepEqual(plain(result.scope), {
+      folderIds: [FOLDER],
+      accountIds: null,
+      includeSubFolders: true,
+    });
+  });
+
+  it("keeps the account scope and an explicit includeSubFolders", async () => {
+    const messages = fakeMessages({ folders: { [FOLDER]: sample(30) }, queryPageSize: 10 });
+    const query = loadHandlers(messages).get("messages.query");
+
+    const result = await query({
+      query: { subject: "Re", accountId: "account1", includeSubFolders: false },
+      limit: 5,
+    });
+
+    assert.equal(result.messages.length, 5);
+    assert.ok(result.scope, "a first page says what it searched");
+    assert.deepEqual(plain(result.scope), {
+      folderIds: null,
+      accountIds: ["account1"],
+      includeSubFolders: false,
+    });
+  });
+
+  it("reports a query that named no folder as unscoped", async () => {
+    const messages = fakeMessages({ folders: { [FOLDER]: sample(30) }, queryPageSize: 10 });
+    const query = loadHandlers(messages).get("messages.query");
+
+    const result = await query({ query: { subject: "Re" }, limit: 5 });
+
+    assert.ok(result.scope, "a first page says what it searched");
+    assert.deepEqual(plain(result.scope), {
+      folderIds: null,
+      accountIds: null,
+      includeSubFolders: false,
+    });
+  });
+
+  it("leaves the scope off a continuation page", async () => {
+    const messages = fakeMessages({ folders: { [FOLDER]: sample(30) }, queryPageSize: 10 });
+    const query = loadHandlers(messages).get("messages.query");
+    const params = { query: { subject: "Re", folderId: FOLDER }, limit: 5 };
+
+    const first = await query(params);
+    const next = await query({ ...params, cursor: first.cursor });
+
+    assert.equal(next.messages.length, 5, "the walk carried on");
+    assert.equal(next.scope, undefined, "the scope belongs to the first page only");
+  });
 });
