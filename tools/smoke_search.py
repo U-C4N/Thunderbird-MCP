@@ -65,13 +65,18 @@ def common_term(messages: list[dict[str, Any]]) -> str | None:
     """
     counts: Counter[str] = Counter()
     seen_as: dict[str, str] = {}
+    first_seen: dict[str, int] = {}
     for message in messages:
-        words = {w for w in WORD.findall(message.get("subject") or "") if len(w) >= MIN_WORD}
-        for word in {w.lower() for w in words}:
+        # In subject order, so a tie between two words is settled by which one a
+        # reader met first — deterministic, unlike set iteration.
+        words = [w for w in WORD.findall(message.get("subject") or "") if len(w) >= MIN_WORD]
+        for word in dict.fromkeys(w.lower() for w in words):
             counts[word] += 1
+            first_seen.setdefault(word, len(first_seen))
         for word in words:
             seen_as.setdefault(word.lower(), word)
-    for word, n in counts.most_common():
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], first_seen[kv[0]]))
+    for word, n in ranked:
         if n >= MIN_SHARED:
             return seen_as[word]
     return None

@@ -122,7 +122,7 @@
       browser.tbx
         .writeStatus({ ...report, transport, writtenAt: new Date().toISOString() })
         .catch((ex) => {
-          tbxLog.warn("could not update the status file:", ex.message || ex);
+          tbxLog.warn("could not update the status file:", tbxError.readable(ex));
         });
     },
   });

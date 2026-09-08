@@ -18,7 +18,9 @@ Search the user's mail. Combine `full_text` with any filters below.
 `full_text` uses Thunderbird's global index and searches headers and bodies
 of already-indexed messages; `subject`/`author`/`body` are substring matches
 evaluated per folder. Dates are ISO-8601. Results are summaries — call
-`mail_get` for a body. Continue with `cursor=nextCursor`.
+`mail_get` for a body. Continue with `cursor=nextCursor`. A first page
+carries `scope` — the folder and account ids the query covered — so an empty
+result can be read against what was actually searched.
 
 Parameters: full_text, subject, author, recipients, body, folder_id, account_id, include_subfolders, unread, flagged, junk, has_attachment, tags, tag_mode, from_date, to_date, to_me, from_me, min_size, max_size, limit, cursor  
 *(bold means required; `confirm` is the confirmation gate)*
@@ -1213,6 +1215,9 @@ Recent lines from Thunderbird's error console, newest last.
 Narrow it with `contains` — `tbmcp` shows this bridge's own complaints, and an
 add-on id or a source filename shows someone else's. Anything shaped like a
 password or token is redacted inside Thunderbird before it is sent.
+
+Lines the bridge writes with `console.*` (`source: "console"`) are included
+alongside the error console's own entries, merged by time.
 
 Parameters: contains, limit  
 *(bold means required; `confirm` is the confirmation gate)*

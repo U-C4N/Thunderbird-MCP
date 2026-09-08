@@ -28,6 +28,13 @@ jobs:
         with:
           enable-cache: true
 
+      # Pinned rather than whatever the image ships: the add-on tests need
+      # `node --test` with glob support, and a runner upgrade must not change what
+      # this job means.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
       # A project venv rather than `--system`: Ubuntu's system interpreter is
       # externally managed and refuses installs. `uv run` then picks up .venv on both
       # platforms without any activation dance.
@@ -47,8 +54,14 @@ jobs:
       - name: Add-on unit tests (node)
         # The add-on's background and privileged scripts run under node's vm with
         # fakes for the WebExtension and XPCOM surfaces (tests/js/README.md). Quote
-        # the glob: `node --test <dir>` does not expand on the Windows runner.
-        run: node --test "tests/js/*.test.mjs"
+        # the glob: `node --test <dir>` does not expand on the Windows runner. And a
+        # glob that matches nothing exits 0, so count the files first: a renamed
+        # directory must not disable this layer behind a green tick.
+        shell: bash
+        run: |
+          count=$(ls tests/js/*.test.mjs 2>/dev/null | wc -l)
+          test "$count" -gt 0 || { echo "no add-on test files found"; exit 1; }
+          node --test "tests/js/*.test.mjs"
 
       - name: Cross-layer consistency
         # Compares the Python tools, the add-on handlers and the privileged forwarding
@@ -71,7 +84,9 @@ jobs:
         run: uv run python -m tbmcp tools --toolsets all
 
       - uses: actions/upload-artifact@v4
-        if: matrix.os == 'windows-latest' && matrix.python == '3.14'
+        # The settled interpreter, not the newest: a wheel regression on 3.14 must
+        # not silently stop the release artifact from being produced.
+        if: matrix.os == 'windows-latest' && matrix.python == '3.13'
         with:
           name: thunderbird-mcp-addon
           path: build/*.xpi

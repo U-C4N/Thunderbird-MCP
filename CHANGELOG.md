@@ -95,6 +95,8 @@ was verified against Thunderbird 155.
 - `search_conversation` returns `participants` and `totalAvailable`.
 - Result payloads no longer carry keys with `null` values for fields that were not
   produced.
+- `tb_console` records gain `source: "console"` for the add-on's own lines, and
+  `buffered` counts both stores.
 
 Reported in #3.
 

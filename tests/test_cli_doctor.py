@@ -435,3 +435,32 @@ def test_a_stale_addon_is_named_even_while_thunderbird_is_closed(monkeypatch, tm
     assert "Thunderbird is not running" in out
     assert "installed add-on is 1.2.0, source is 1.3.0" in out
     assert "tbmcp install-addon" in out
+
+
+@pytest.mark.usefixtures("_clean_tbmcp_env")
+def test_the_daemon_line_reflects_the_daemon_the_probe_started(monkeypatch, tmp_path, capsys):
+    """`doctor` read the advertisement before its probe autostarted a daemon, so the
+    most common first run printed `daemon: not running` directly above
+    `connected: True` — and shipped `daemon.running: false` in --json."""
+    from types import SimpleNamespace
+
+    from tbmcp.ipc import DaemonInfo
+
+    _stub_common(
+        monkeypatch,
+        bridge_status={"connected": True, "thunderbird": {"addonVersion": "1.3.0"}},
+        addon_summary={"addonVersion": "1.3.0", "thunderbirdRunning": True},
+        profile=_profile(tmp_path, {**_ADDON_STATUS, "addonVersion": "1.3.0"}),
+    )
+    _stub_server(monkeypatch, connected=True)
+    # Nothing advertised before the probe; a daemon advertised once it has run.
+    loads = iter([None, SimpleNamespace(pid=4242, port=5151)])
+    monkeypatch.setattr(DaemonInfo, "load", classmethod(lambda cls: next(loads, None)))
+
+    exit_code = cmd_doctor(build_parser().parse_args(["doctor", "--json", "--wait", "0"]))
+
+    report = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert report["daemon"]["running"] is True
+    assert report["daemon"]["pid"] == 4242
+    assert report["daemon"]["logFile"].endswith("daemon.log")

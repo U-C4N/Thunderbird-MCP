@@ -145,6 +145,9 @@ def register(reg: Registrar) -> None:
         Narrow it with `contains` — `tbmcp` shows this bridge's own complaints, and an
         add-on id or a source filename shows someone else's. Anything shaped like a
         password or token is redacted inside Thunderbird before it is sent.
+
+        Lines the bridge writes with `console.*` (`source: "console"`) are included
+        alongside the error console's own entries, merged by time.
         """
         result = await call(
             "x.admin.consoleMessages",

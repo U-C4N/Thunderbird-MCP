@@ -265,6 +265,15 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     asyncio.run(probe())
 
+    # The probe may have started the daemon it then connected to, so the
+    # advertisement read above can be stale: on a first run it printed "daemon:
+    # not running" directly above "connected: True". Read it again now.
+    info = DaemonInfo.load()
+    report["daemon"] = (
+        {"running": True, "pid": info.pid, "port": info.port} if info else {"running": False}
+    )
+    report["daemon"]["logFile"] = str(daemon_log_path())
+
     # Both derived from what is already in the report, once the probe has filled in
     # the live half: which add-on is actually running, and the add-on's own account
     # of its connection attempts.

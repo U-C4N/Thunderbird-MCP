@@ -235,8 +235,8 @@ TBX_MODULE_NAMES.push("gloda");
     }
   }
 
-  /** Everyone in a thread, in the order they first appear — which reads as the
-   *  order they joined the discussion. */
+  /** Everyone in a thread, in the order the index handed the messages over,
+   *  each named once. */
   function participants(messages) {
     const labels = [];
     for (const message of messages) {

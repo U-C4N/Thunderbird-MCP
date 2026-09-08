@@ -112,7 +112,7 @@
   /**
    * Collect up to `limit` headers, starting a walk or resuming one.
    *
-   * @param {string|null} cursor  ours (`tbx:<n>`) or a raw Thunderbird list id.
+   * @param {string|null} cursor  ours (`tbx:<load>:<n>`) or a raw Thunderbird list id.
    * @param {Function} start  opens the list, when there is no cursor to resume.
    */
   async function collectPage(cursor, start, limit) {
