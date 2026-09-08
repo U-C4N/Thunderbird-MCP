@@ -22,6 +22,45 @@ var tbxError = {
   thunderbird(message, extra) {
     return Object.assign(new Error(message), { tbxKind: "thunderbird", ...extra });
   },
+  /**
+   * Unpack a failure the privileged half packed into a message, or null.
+   *
+   * Only a message survives the hop out of the experiment sandbox, so
+   * experiment/core.js serialises the whole taxonomy into one and everything
+   * that calls `browser.tbx.invoke` unpacks it here.
+   */
+  fromWire(ex) {
+    const message = String((ex && ex.message) || ex);
+    if (!message.startsWith("tbxerr:")) {
+      return null;
+    }
+    let payload = null;
+    try {
+      payload = JSON.parse(message.slice("tbxerr:".length));
+    } catch (parseError) {
+      return null; // a message that merely starts like ours
+    }
+    if (!payload || !payload.message) {
+      return null;
+    }
+    const extra = payload.code ? { code: payload.code } : undefined;
+    switch (payload.kind) {
+      case "usage":
+        return this.usage(payload.message, extra);
+      case "unsupported":
+        return this.unsupported(payload.message, extra);
+      case "blocked":
+        return this.blocked(payload.message, payload.needs, extra);
+      default:
+        return this.thunderbird(payload.message, extra);
+    }
+  },
+  /** What to print about a failure: our envelope unwrapped, or the message as-is.
+   *  For a log line, where the kind and the needs have nowhere to go. */
+  readable(ex) {
+    const typed = this.fromWire(ex);
+    return String((typed && typed.message) || (ex && ex.message) || ex);
+  },
   /** Normalise anything thrown into the wire shape. */
   serialize(ex) {
     if (!ex) {
@@ -30,7 +69,9 @@ var tbxError = {
     const payload = {
       kind: ex.tbxKind || "thunderbird",
       message: String(ex.message || ex),
-      code: ex.code || ex.name || null,
+      // A bare "Error" is not a code — it reached the model as a second, empty
+      // failure tag alongside the real one.
+      code: ex.code || (ex.name && ex.name !== "Error" ? ex.name : null),
     };
     if (ex.needs) {
       payload.needs = Array.isArray(ex.needs) ? ex.needs : [ex.needs];

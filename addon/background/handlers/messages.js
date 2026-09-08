@@ -7,14 +7,26 @@
  *   - use `tbxUtil.mapLimited` for bulk work so a 500-message operation neither
  *     stalls the UI nor opens 500 IMAP requests at once
  *
- * Pagination note: Thunderbird returns a `MessageList` with an opaque `id` plus a
- * first page, and `messages.continueList(id)` walks it. We surface that id as our
- * `cursor` unchanged.
+ * Pagination note: Thunderbird hands out a `MessageList` — one page of messages
+ * plus an `id` that continues *after* that page. Page size is the user's own
+ * preference (`extensions.webextensions.messagesPerPage`), so a `limit` usually
+ * runs out mid-page, and returning the list id there would skip everything
+ * between the two. So a cursor is one of:
+ *   - a raw Thunderbird list id, when the page ended exactly on the limit and
+ *     nothing was left over;
+ *   - `tbx:<load>:<n>`, ours, naming the tail we parked (with the id that
+ *     continues after it) because the limit stopped us mid-page. `<load>` names
+ *     this load of the script, so a cursor from before a background restart is
+ *     refused rather than mistaken for one of ours.
+ * Only the last 32 part-read pages are kept; the rest are dropped, and their
+ * Thunderbird lists aborted, so an abandoned walk costs nothing.
  */
 
 {
   const DEFAULT_LIMIT = 25;
   const BULK_CONCURRENCY = 8;
+  const PARKED_PAGES = 32;
+  const CURSOR_PREFIX = "tbx:";
 
   /** Flatten a MessageHeader into the shape _common.message_summary expects. */
   function header(message) {
@@ -44,33 +56,84 @@
     };
   }
 
-  /** Walk a MessageList to at most `limit` items, returning a continuation cursor. */
-  async function takePage(list, limit) {
-    const messages = [];
-    let current = list;
-    while (current) {
-      for (const message of current.messages || []) {
-        messages.push(header(message));
-        if (messages.length >= limit) {
-          // Keep the list alive so the caller can continue from it.
-          return { messages, cursor: current.id || null };
-        }
-      }
-      if (!current.id) {
-        return { messages, cursor: null };
-      }
-      current = await browser.messages.continueList(current.id);
-      if (!current || !current.messages || current.messages.length === 0) {
-        return { messages, cursor: current && current.id ? current.id : null };
-      }
+  /* Pages we stopped part-way through, by the cursor we minted for them. Bounded,
+   * because a caller that walks away from a search must not pin its messages —
+   * and its Thunderbird list — for the rest of the session. */
+  const parked = new Map();
+  let parkSequence = 0;
+
+  /* Every cursor we mint names this load of the script. The map above is empty
+   * again after a background restart, and without this a cursor from before it
+   * would quietly claim the new load's first parked page instead of being
+   * refused. */
+  const LOAD_ID = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+
+  /** Let go of a Thunderbird list nobody can reach any more. */
+  function abandonList(listId) {
+    if (listId) {
+      // Best effort: the list would expire on its own, this is just sooner.
+      Promise.resolve(browser.messages.abortList(listId)).catch(() => {});
     }
-    return { messages, cursor: null };
   }
 
-  async function resumeOrStart(cursor, start) {
-    if (cursor) {
+  /** Hold `rest` for the next call, and return the cursor that claims it back. */
+  function park(listId, rest) {
+    if (parked.size >= PARKED_PAGES) {
+      const [oldest] = parked.keys(); // a Map iterates in insertion order
+      abandonList(parked.get(oldest).listId);
+      parked.delete(oldest);
+    }
+    parkSequence += 1;
+    const cursor = `${CURSOR_PREFIX}${LOAD_ID}:${parkSequence}`;
+    parked.set(cursor, { listId, rest });
+    return cursor;
+  }
+
+  /**
+   * Take back a page we parked, or say why the cursor is worthless.
+   *
+   * Anything carrying our prefix is ours to answer for: a cursor from another
+   * load carries another load id, so it is simply not in the map, and it is
+   * refused here rather than handed to Thunderbird as if it were a list id.
+   */
+  function unpark(cursor) {
+    const held = parked.get(cursor);
+    if (!held) {
+      throw tbxError.usage(
+        `that cursor is no longer valid: it was evicted (only ${PARKED_PAGES} part-read ` +
+          "pages are kept) or belongs to an earlier Thunderbird session — re-run the " +
+          "search without a cursor"
+      );
+    }
+    parked.delete(cursor);
+    return held;
+  }
+
+  /**
+   * Collect up to `limit` headers, starting a walk or resuming one.
+   *
+   * @param {string|null} cursor  ours (`tbx:<load>:<n>`) or a raw Thunderbird list id.
+   * @param {Function} start  opens the list, when there is no cursor to resume.
+   */
+  async function collectPage(cursor, start, limit) {
+    const messages = [];
+    let pending = []; // fetched but not yet returned, in order
+    let listId = null; // the Thunderbird list that continues after `pending`
+
+    const absorb = (page) => {
+      pending = page && page.messages ? [...page.messages] : [];
+      listId = (page && page.id) || null;
+    };
+
+    if (!cursor) {
+      absorb(await start());
+    } else if (cursor.startsWith(CURSOR_PREFIX)) {
+      const held = unpark(cursor);
+      pending = held.rest;
+      listId = held.listId;
+    } else {
       try {
-        return await browser.messages.continueList(cursor);
+        absorb(await browser.messages.continueList(cursor));
       } catch (ex) {
         throw tbxError.usage(
           "that cursor has expired (Thunderbird drops message lists when it restarts " +
@@ -78,21 +141,84 @@
         );
       }
     }
-    return start();
+
+    for (;;) {
+      while (pending.length) {
+        if (messages.length >= limit) {
+          // Stopped mid-page: park the rest, because the list id continues after
+          // the whole page and would skip every message still sitting here.
+          return { messages, cursor: park(listId, pending) };
+        }
+        messages.push(header(pending.shift()));
+      }
+      if (messages.length >= limit || !listId) {
+        // Nothing left over, so Thunderbird's own id is the cursor; when the list
+        // is spent there is no id and the walk is over.
+        return { messages, cursor: listId };
+      }
+      absorb(await browser.messages.continueList(listId));
+      if (!pending.length) {
+        // An empty page ends this call; its id, if any, can still be resumed.
+        return { messages, cursor: listId };
+      }
+    }
   }
 
   // --------------------------------------------------------------------- query
 
+  /**
+   * Run a query and return its first page.
+   *
+   * Never ask for `returnMessageListId`: that flag makes Thunderbird answer with
+   * the list id itself, a bare string with no messages on it, which is how every
+   * search used to come back empty. A build that answers with one anyway is one
+   * `continueList` away from the page we wanted.
+   */
+  async function startQuery(query) {
+    const first = await browser.messages.query(query);
+    return typeof first === "string" ? browser.messages.continueList(first) : first;
+  }
+
+  /** A folder or account id, or a list of them, as a list — or null for neither. */
+  function idList(value) {
+    if (!value) {
+      return null;
+    }
+    return Array.isArray(value) ? [...value] : [value];
+  }
+
+  /**
+   * What the search was aimed at, echoed back so the answer says what it covered
+   * without anyone having to enumerate folders to find out.
+   */
+  function queryScope(query) {
+    const folderIds = idList(query.folderId);
+    const accountIds = idList(query.accountId);
+    return {
+      folderIds,
+      accountIds,
+      // There is nothing to recurse into unless a folder or account was named.
+      includeSubFolders:
+        typeof query.includeSubFolders === "boolean"
+          ? query.includeSubFolders
+          : Boolean(folderIds || accountIds),
+    };
+  }
+
   tbxRegistry.define("messages.query", async (params) => {
     const limit = params.limit || DEFAULT_LIMIT;
     const query = Object.assign({}, params.query || {});
-    // Ask Thunderbird for a resumable list rather than one giant array.
-    query.returnMessageListId = true;
-    query.messagesPerPage = Math.min(Math.max(limit, 10), 100);
+    // Any positive page size is legal; asking for exactly what the caller wants
+    // keeps the common case to one round trip. Thunderbird may still cut a page
+    // short (autoPaginationTimeout), so the walk below loops regardless.
+    query.messagesPerPage = limit;
 
-    const list = await resumeOrStart(params.cursor, () => browser.messages.query(query));
-    const paged = await takePage(list, limit);
+    const paged = await collectPage(params.cursor, () => startQuery(query), limit);
     const result = { messages: paged.messages, cursor: paged.cursor };
+    if (!params.cursor) {
+      // Only on the first page: a continuation is by definition the same search.
+      result.scope = queryScope(query);
+    }
     if (query.fullText && browser.tbx) {
       // Worth saying: fullText only sees what the global indexer has processed.
       const indexed = await browser.tbx.globalIndexEnabled().catch(() => null);
@@ -108,13 +234,15 @@
   tbxRegistry.define("messages.list", async (params) => {
     const folderId = tbxUtil.need(params, "folderId", "string");
     const limit = params.limit || DEFAULT_LIMIT;
-    const list = await resumeOrStart(params.cursor, () =>
-      browser.messages.list(folderId, {
-        sortType: params.sortType || "date",
-        sortOrder: params.sortOrder || "descending",
-      })
+    const paged = await collectPage(
+      params.cursor,
+      () =>
+        browser.messages.list(folderId, {
+          sortType: params.sortType || "date",
+          sortOrder: params.sortOrder || "descending",
+        }),
+      limit
     );
-    const paged = await takePage(list, limit);
     return { messages: paged.messages, cursor: paged.cursor, folderId };
   });
 
@@ -258,12 +386,19 @@
         "saving files needs the privileged half of the add-on, which did not load"
       );
     }
-    const written = await browser.tbx.writeFile({
-      directory,
-      filename: params.filename || file.name,
-      base64: tbxBase64.fromArrayBuffer(buffer),
-      overwrite: Boolean(params.overwrite),
-    });
+    let written;
+    try {
+      written = await browser.tbx.writeFile({
+        directory,
+        filename: params.filename || file.name,
+        base64: tbxBase64.fromArrayBuffer(buffer),
+        overwrite: Boolean(params.overwrite),
+      });
+    } catch (ex) {
+      // "already exists — pass overwrite=true" is exactly the kind of refusal the
+      // caller can act on, and it only survives the hop packed into a message.
+      throw tbxError.fromWire(ex) || ex;
+    }
     return { path: written.path, bytes: written.bytes, name: written.name };
   });
 

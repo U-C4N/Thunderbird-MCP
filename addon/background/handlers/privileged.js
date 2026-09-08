@@ -22,10 +22,34 @@
       const report = await browser.tbx.availableModules();
       known = report.methods || [];
     } catch (ex) {
-      tbxLog.warn("could not enumerate privileged methods:", ex.message || ex);
+      tbxLog.warn("could not enumerate privileged methods:", tbxError.readable(ex));
       known = [];
     }
     return known;
+  }
+
+  /**
+   * Re-raise what the privileged half threw, in the kind it chose.
+   *
+   * An untagged message is Thunderbird's own failure, or an add-on half older
+   * than this one, and still gets the guesswork it always got.
+   */
+  function retag(ex) {
+    const typed = tbxError.fromWire(ex);
+    if (typed) {
+      return typed;
+    }
+    const message = String(ex.message || ex);
+    if (/ is required|must be|unknown privileged method|not an? /.test(message)) {
+      return tbxError.usage(message);
+    }
+    if (/does not expose|unavailable/.test(message)) {
+      return tbxError.unsupported(message);
+    }
+    if (/not writable|will not be written|locked by/.test(message)) {
+      return tbxError.blocked(message);
+    }
+    return tbxError.thunderbird(message);
   }
 
   /**
@@ -56,19 +80,7 @@
     try {
       return await browser.tbx.invoke(bare, params);
     } catch (ex) {
-      // Errors thrown inside the experiment arrive as plain Error objects with the
-      // message intact; re-tag them so the taxonomy survives the hop.
-      const message = String(ex.message || ex);
-      if (/ is required|must be|unknown privileged method|not an? /.test(message)) {
-        throw tbxError.usage(message);
-      }
-      if (/does not expose|unavailable/.test(message)) {
-        throw tbxError.unsupported(message);
-      }
-      if (/not writable|will not be written|locked by/.test(message)) {
-        throw tbxError.blocked(message);
-      }
-      throw tbxError.thunderbird(message);
+      throw retag(ex);
     }
   };
 

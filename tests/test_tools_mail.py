@@ -78,6 +78,39 @@ async def test_search_rejects_a_malformed_date(fake_bridge) -> None:
     assert "ISO-8601" in _text(result)
 
 
+async def test_search_echoes_the_scope_the_add_on_searched(fake_bridge) -> None:
+    """The answer says what it covered, so nobody has to enumerate folders to find out."""
+    scope = {"folderIds": ["account1://INBOX"], "accountIds": None, "includeSubFolders": True}
+    bridge = fake_bridge({"messages.query": {"messages": [MESSAGE], "scope": scope}})
+    async with Client(_server(bridge)) as client:
+        result = await client.call_tool("mail_search", {"subject": "Invoice"})
+    assert not result.is_error, _text(result)
+    assert result.structured_content["scope"] == scope
+
+
+async def test_search_passes_on_the_index_note(fake_bridge) -> None:
+    bridge = fake_bridge({"messages.query": {"messages": [], "indexNote": "indexing is off"}})
+    async with Client(_server(bridge)) as client:
+        result = await client.call_tool("mail_search", {"full_text": "invoice"})
+    assert not result.is_error, _text(result)
+    assert result.structured_content["indexNote"] == "indexing is off"
+
+
+async def test_search_reports_no_field_the_add_on_never_filled(fake_bridge) -> None:
+    """`searchedFolders` was such a field: always null, and a null reads to a model
+    as a fact about the mailbox rather than as a field nobody wrote."""
+    bridge = fake_bridge({"messages.query": {"messages": [MESSAGE]}})
+    async with Client(_server(bridge)) as client:
+        result = await client.call_tool("mail_search", {"subject": "Invoice"})
+    assert not result.is_error, _text(result)
+
+    payload = result.structured_content
+    assert "searchedFolders" not in payload
+    assert "scope" not in payload
+    assert "indexNote" not in payload
+    assert [key for key, value in payload.items() if value is None] == []
+
+
 async def test_delete_without_confirmation_is_refused(fake_bridge) -> None:
     bridge = fake_bridge()
     async with Client(_server(bridge)) as client:

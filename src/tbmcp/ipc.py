@@ -22,8 +22,17 @@ MAX_LINE = 64 * 1024 * 1024  # a raw message body can legitimately be large
 
 
 def state_dir() -> Path:
-    """Per-user directory for the daemon advertisement and lock."""
-    if sys.platform == "win32":
+    """Per-user directory for the daemon advertisement, lock and log.
+
+    `TBMCP_STATE_DIR` overrides the platform default on every platform. macOS has
+    no conventional environment variable for this directory, so without an
+    explicit override there is no way for a test — or a CI job — to keep the
+    daemon's files out of the user's real ~/Library.
+    """
+    override = os.environ.get("TBMCP_STATE_DIR")
+    if override:
+        base = override
+    elif sys.platform == "win32":
         base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
     elif sys.platform == "darwin":
         base = str(Path.home() / "Library" / "Application Support")
@@ -32,6 +41,16 @@ def state_dir() -> Path:
     path = Path(base) / "tbmcp"
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def daemon_log_path() -> Path:
+    """Where the daemon keeps its log.
+
+    The daemon is spawned detached with its streams on DEVNULL, so everything it
+    logs is discarded the moment it is written. One known path is what turns "the
+    bridge went quiet" into something anyone can read after the fact.
+    """
+    return state_dir() / "daemon.log"
 
 
 @dataclass
@@ -104,6 +123,25 @@ class DaemonInfo:
             cls.path().unlink()
         except FileNotFoundError:
             pass
+
+    @classmethod
+    def clear_if_owned(cls, pid: int) -> None:
+        """Withdraw the advertisement only while it still names `pid`.
+
+        A daemon that stands down because another one took the advertisement over
+        must not delete the winner's file on its way out — that leaves `serve` with
+        nothing to find and two healthy processes looking blameless.
+
+        Reads the raw file rather than `load()`: what matters here is who wrote it,
+        not whether that process is still alive or speaks our protocol version.
+        """
+        try:
+            raw = json.loads(cls.path().read_text(encoding="utf-8"))
+            owner = int(raw["pid"])
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+            return
+        if owner == pid:
+            cls.clear()
 
 
 def _restrict_permissions(path: Path) -> None:
@@ -224,11 +262,19 @@ def new_token() -> str:
 
 
 async def read_message(reader: asyncio.StreamReader) -> dict[str, Any] | None:
-    """Read one newline-delimited JSON object. `None` means the peer hung up."""
+    """Read one newline-delimited JSON object. `None` means the peer hung up.
+
+    Both ends must open their streams with `limit=MAX_LINE`; asyncio's own default is
+    64 KiB, which is far below what a legitimate frame can be. A frame past the
+    reader's buffer is not truncated but abandoned, and `readline()` reports that as a
+    bare `ValueError` — untyped, it looked to the caller like the peer disconnecting.
+    """
     try:
         line = await reader.readline()
     except (asyncio.IncompleteReadError, ConnectionResetError):
         return None
+    except ValueError as exc:
+        raise TransportError("control message exceeded the maximum size", code="TOO_LARGE") from exc
     if not line:
         return None
     if len(line) > MAX_LINE:

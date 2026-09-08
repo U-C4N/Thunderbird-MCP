@@ -6,8 +6,9 @@ Thunderbird has no external API. Anything that wants to drive it must run *insid
 Thunderbird. The only questions are how privileged that inside code can be, and how
 it talks to the outside.
 
-Every claim below was verified against a live **Thunderbird 153.0** (Windows 11,
-build `20260717002111`), not inferred from documentation. See
+Every claim below was verified against a live Thunderbird — **153.0** (Windows 11,
+build `20260717002111`) when first written, **155.0** for 1.3.0 — not inferred from
+documentation. See
 [`docs/VERIFIED-FINDINGS.md`](VERIFIED-FINDINGS.md) for the raw probe output.
 
 ### The privilege question
@@ -42,9 +43,10 @@ and `fetch("http://127.0.0.1:PORT/...")`. The default MV2 CSP does not restrict
 The honest cost of this choice: the connection lives in the add-on's background page,
 so its lifetime and reconnect behaviour are now ours to manage. A server *inside*
 Thunderbird would simply be listening whenever Thunderbird is up. In practice the page
-is persistent on 153 and stays connected, but reattaching after the daemon dies
-abnormally is still slower than it should be — measured, and left open, in
-[`VERIFIED-FINDINGS.md`](VERIFIED-FINDINGS.md).
+is persistent on 153–155 and stays connected. Reattaching after the daemon dies
+abnormally used to be slow — measured in
+[`VERIFIED-FINDINGS.md`](VERIFIED-FINDINGS.md); since 1.3.0 the add-on's transport
+watchdogs reconnect within seconds, and the daemon records every attempt.
 
 Benefits over an in-Thunderbird HTTP server:
 
@@ -106,6 +108,24 @@ src/tbmcp/
 docs/
 tests/
 ```
+
+## Testing
+
+Three layers, because no single one can see the whole chain:
+
+- **pytest** (`tests/`) runs the Python side end to end through an in-memory MCP
+  client, with the bridge replaced by a recorder (`tests/conftest.py`). It proves
+  argument validation, gating, the shape of every result and the daemon's own
+  protocol, and needs no Thunderbird — which is also its limit: it cannot see the
+  add-on, and every 1.2.0 search defect lived there.
+- **node** (`tests/js`, `node --test "tests/js/*.test.mjs"`) runs the add-on's
+  real background and privileged scripts under `node:vm` against fakes of the
+  WebExtension and XPCOM surfaces (`tests/js/harness.mjs`). The privileged half is
+  spliced exactly as `build_xpi.py` splices it, so the sandbox rules — no DOM
+  timers, a separate realm, errors that must be `ExtensionError`s — are exercised.
+- **live** (`tools/smoke_live.py`, `tools/smoke_search.py`) drives a running
+  Thunderbird read-only and is the only layer that sees Thunderbird's actual
+  behaviour. It is not in CI; run it before a release.
 
 ## Wire protocol
 

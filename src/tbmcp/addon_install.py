@@ -252,6 +252,28 @@ def install_automatic(
 
     log.info("starting Thunderbird with automation enabled")
     _launch(exe, ["-marionette", "-remote-allow-system-access"], profile)
+    # From here on Thunderbird is ours to put back. Every exit — a Marionette that
+    # never opens, a script that answers nothing, an exception mid-way — goes
+    # through the same restart, so the command can fail without leaving the mail
+    # client closed. That happened: the add-on was installed and attached, the
+    # install script's reply was lost, and Thunderbird stayed down.
+    try:
+        return _install_over_marionette(
+            exe, profile, package, identifier, restart_after=restart_after
+        )
+    finally:
+        _restart_plain(exe, profile, restart_after)
+
+
+def _install_over_marionette(
+    exe: pathlib.Path,
+    profile: ThunderbirdProfile | None,
+    package: pathlib.Path,
+    identifier: str,
+    *,
+    restart_after: bool,
+) -> InstallOutcome:
+    """Drive the install through Marionette; the caller owns the restart."""
     if not marionette.wait_for_port(timeout=90.0):
         raise TbmcpError(
             "Thunderbird started but never opened the Marionette port. Try "
@@ -263,31 +285,62 @@ def install_automatic(
     try:
         client.start_chrome_session()
         report = client.execute(INSTALL_SCRIPT, [str(package), identifier], timeout_ms=120_000)
+        if not isinstance(report, dict):
+            # A lost reply is not a failed install: the script may well have run to
+            # completion. Ask the AddonManager before deciding.
+            report = _report_from_status(client, identifier, report, restarting=restart_after)
     finally:
         # Always take Marionette back down: while it is listening, any local process
         # can run privileged code inside Thunderbird.
         client.quit_application()
 
-    if not isinstance(report, dict):
-        raise TbmcpError(f"unexpected response from Thunderbird: {report!r}")
     if report.get("error"):
-        message = str(report["error"])
-        _restart_plain(exe, profile, restart_after)
-        return InstallOutcome(False, message, package, report)
+        return InstallOutcome(False, str(report["error"]), package, report)
 
     result = report.get("result") or {}
     if not result.get("ok"):
-        _restart_plain(exe, profile, restart_after)
         return InstallOutcome(False, str(result.get("error") or "install failed"), package, report)
 
     _stop()
-    _restart_plain(exe, profile, restart_after)
     return InstallOutcome(
         True,
         f"installed {identifier} {result.get('version')} "
         f"(unsigned, active={result.get('isActive')})",
         package,
         report,
+    )
+
+
+def _report_from_status(
+    client: marionette.Marionette, identifier: str, raw: object, *, restarting: bool
+) -> dict:
+    """Rebuild an install report from the AddonManager when the script's reply was lost."""
+    expected = addon_version()
+    status = client.execute(STATUS_SCRIPT, [identifier], timeout_ms=20_000)
+    if (
+        isinstance(status, dict)
+        and status.get("installed")
+        and status.get("isActive")
+        and str(status.get("version")) == expected
+    ):
+        log.warning(
+            "the install script's reply was lost (%r), but Thunderbird reports %s %s "
+            "installed and active — treating that as success",
+            raw,
+            identifier,
+            expected,
+        )
+        return {"result": {"ok": True, "version": expected, "isActive": True}, "recovered": True}
+    raise TbmcpError(
+        f"unexpected response from Thunderbird: {raw!r}, and the AddonManager does not "
+        f"report {identifier} {expected} as installed and active ({status!r}). "
+        + (
+            "Thunderbird is being restarted; "
+            if restarting
+            else "Thunderbird was left stopped (--no-restart); "
+        )
+        + "try again, or use `tbmcp install-addon --manual`.",
+        code="INSTALL_UNVERIFIED",
     )
 
 

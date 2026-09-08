@@ -130,29 +130,41 @@ TBX_MODULE_NAMES.push("gloda");
     }
   }
 
-  /** Accept a WebExtension folder id or a raw folder URI; gloda speaks URIs. */
-  function folderRefToUri(ref) {
+  /** An account's root folder URI, or null if this account cannot say. */
+  function rootUri(account) {
+    try {
+      return account.incomingServer.rootFolder.URI;
+    } catch (ex) {
+      return null;
+    }
+  }
+
+  /**
+   * A predicate over hits for one folder reference.
+   *
+   * A WebExtension folder id (`account1://INBOX`) and a folder URI
+   * (`imap://me@example.com/INBOX`) both contain `://`, so the only way to tell
+   * them apart is to ask which accounts exist — the id's prefix is an account
+   * key, the URI's is a scheme. Translating the id to a URI is what used to
+   * happen, and it produced `imap://…//INBOX`, which matched nothing at all.
+   * Each hit already carries both, so match on whichever the caller named.
+   */
+  function folderMatcher(ref) {
     const text = String(ref).trim();
-    if (text.includes("://")) {
-      return text;
-    }
     const cut = text.indexOf(":/");
-    if (cut < 1) {
-      throw H.usage(
-        `${text} is not a folder id — pass one returned by folder_list, or a folder URI`
-      );
+    const key = cut > 0 ? text.slice(0, cut) : "";
+    for (const account of needMod("MailServices").accounts.accounts) {
+      if (account.key === key) {
+        return (entry) => entry.folderId === text;
+      }
+      const root = rootUri(account);
+      if (root && (text === root || text.startsWith(`${root}/`))) {
+        return (entry) => entry.folderUri === text;
+      }
     }
-    const accounts = extensionAccounts();
-    if (!accounts || !accounts.folderPathToURI) {
-      throw H.unsupported(
-        "this build cannot translate folder ids to folder URIs; pass a folder URI instead"
-      );
-    }
-    const uri = accounts.folderPathToURI(text.slice(0, cut), text.slice(cut + 1));
-    if (!uri) {
-      throw H.usage(`no account with key ${text.slice(0, cut)}`);
-    }
-    return uri;
+    throw H.usage(
+      `${text} names no folder in this profile — pass an id from folder_list, or a folder URI`
+    );
   }
 
   /** Run a gloda query to completion, or give up loudly. */
@@ -181,9 +193,12 @@ TBX_MODULE_NAMES.push("gloda");
   }
 
   function isoDate(value) {
-    if (value instanceof Date) {
+    // Duck-typed rather than an instance check: gloda mints its Dates in its own
+    // realm, where such a check is always false, so every hit came back undated —
+    // which also collapsed the date ordering onto subject alone.
+    if (value && typeof value.getTime === "function") {
       const ms = value.getTime();
-      return Number.isFinite(ms) ? value.toISOString() : null;
+      return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
     }
     // Gloda stores PRTime (microseconds) and normally hands back a Date, but
     // conversation bounds have been seen raw.
@@ -203,6 +218,36 @@ TBX_MODULE_NAMES.push("gloda");
     } catch (ex) {
       return null;
     }
+  }
+
+  /** The identities a message involves, or the addresses we do have.
+   *
+   *  Reading an attribute gloda did not index for this message throws, so the
+   *  whole walk is guarded rather than each access. */
+  function involved(message) {
+    try {
+      if (message.involves && message.involves.length) {
+        return [...message.involves];
+      }
+      return [message.from, ...(message.to || [])];
+    } catch (ex) {
+      return [];
+    }
+  }
+
+  /** Everyone in a thread, in the order the index handed the messages over,
+   *  each named once. */
+  function participants(messages) {
+    const labels = [];
+    for (const message of messages) {
+      for (const identity of involved(message)) {
+        const label = identityLabel(identity);
+        if (label && !labels.includes(label)) {
+          labels.push(label);
+        }
+      }
+    }
+    return labels;
   }
 
   function snippet(message) {
@@ -275,6 +320,27 @@ TBX_MODULE_NAMES.push("gloda");
     return Services.prefs.getBoolPref("mailnews.database.global.indexer.enabled", false);
   }
 
+  /**
+   * Split search terms into the ones the index can match and the ones it cannot.
+   *
+   * The tokenizer keeps only tokens of three characters or more (one for CJK), so
+   * a term like "2.0" becomes "2" and "0" and is dropped entirely. Under AND that
+   * one term zeroes the whole query, silently — which is worth reporting, because
+   * the answer looks exactly like "nothing matched".
+   */
+  function classifyTerms(terms) {
+    const usable = [];
+    const unmatchable = [];
+    for (const term of terms || []) {
+      const tokens = String(term)
+        .split(/[^\p{L}\p{N}]+/u)
+        .filter(Boolean);
+      const matches = tokens.some((token) => token.length >= 3 || token.charCodeAt(0) >= 0x2000);
+      (matches ? usable : unmatchable).push(term);
+    }
+    return { usable, unmatchable };
+  }
+
   // ------------------------------------------------------------------- search
 
   TBX_MODULES["gloda.search"] = async (params) => {
@@ -284,17 +350,12 @@ TBX_MODULE_NAMES.push("gloda");
       MAX_HITS
     );
     const offset = Number.isInteger(params.offset) && params.offset > 0 ? params.offset : 0;
-    const folderUri = params.folderId ? folderRefToUri(params.folderId) : null;
+    const inFolder = params.folderId ? folderMatcher(params.folderId) : null;
     const Searcher = needMod("GlodaMsgSearcher");
 
     const searcher = new Searcher(null, query, params.matchAll !== false);
-    // The tokenizer drops terms shorter than three characters (one or two for
-    // CJK), so a query made only of those silently matches everything or
-    // nothing. Say so instead.
-    const usable = (searcher.fulltextTerms || []).some(
-      (term) => term.length >= 3 || term.charCodeAt(0) >= 0x2000
-    );
-    if (!usable) {
+    const { usable, unmatchable } = classifyTerms(searcher.fulltextTerms);
+    if (!usable.length) {
       throw H.usage(
         `no searchable term in ${JSON.stringify(query)} — the global index needs ` +
           "terms of at least three characters (one for CJK)"
@@ -304,7 +365,7 @@ TBX_MODULE_NAMES.push("gloda");
     /* Gloda has no OFFSET, and a folder filter can only be applied after the
      * fact because the searcher's SQL is fixed. Over-fetch, then slice. */
     const retrieve = Math.min(
-      Math.max((offset + limit) * (folderUri ? 10 : 3), 50),
+      Math.max((offset + limit) * (inFolder ? 10 : 3), 50),
       MAX_RETRIEVE
     );
     const messages = await collect(
@@ -314,18 +375,24 @@ TBX_MODULE_NAMES.push("gloda");
         // ours nests inside it.
         searcher.listener = listener;
         searcher.query = searcher.buildFulltextQuery();
-        searcher.query.limit(retrieve);
+        // One row past what we need: the only way to know whether the corpus was
+        // deeper than the retrieval, without calling a corpus that exactly fills
+        // it truncated.
+        searcher.query.limit(retrieve + 1);
         searcher.collection = searcher.query.getCollection(searcher, null);
       },
       "gloda search",
       SEARCH_TIMEOUT_MS
     );
 
+    const truncated = messages.length > retrieve;
+    const considered = truncated ? messages.slice(0, retrieve) : messages;
+
     // searcher.scores accumulates in the order items were handed to us.
     const scores = searcher.scores || [];
-    let hits = messages.map((message, index) => hit(message, scores[index]));
-    if (folderUri) {
-      hits = hits.filter((entry) => entry.folderUri === folderUri);
+    let hits = considered.map((message, index) => hit(message, scores[index]));
+    if (inFolder) {
+      hits = hits.filter(inFolder);
     }
     hits.sort((a, b) => (b.score || 0) - (a.score || 0) || byDateThenSubject(b, a));
 
@@ -334,17 +401,30 @@ TBX_MODULE_NAMES.push("gloda");
       query,
       hits: hits.slice(offset, offset + limit),
       matched: hits.length,
-      retrieved: messages.length,
+      retrieved: considered.length,
       // The ranking only ordered what we retrieved; a deeper page may reorder.
-      truncated: messages.length >= retrieve,
+      truncated,
       indexEnabled: enabled,
     };
+    if (unmatchable.length) {
+      result.unmatchableTerms = unmatchable;
+    }
     if (!result.hits.length) {
-      result.note = enabled
-        ? "Nothing in the global index matched. Only indexed messages are searchable — " +
-          "check x.gloda.stats, or fall back to mail_search with subject/author filters."
-        : "Thunderbird's global index is disabled, so this search can never match. " +
+      if (!enabled) {
+        result.note =
+          "Thunderbird's global index is disabled, so this search can never match. " +
           "Enable it in Settings > General > Indexing, or use mail_search instead.";
+      } else if (unmatchable.length) {
+        const named = unmatchable.map((term) => JSON.stringify(term)).join(", ");
+        result.note =
+          `The index cannot match ${named} — it tokenizes into pieces shorter than ` +
+          "three characters, and every term has to match. Drop those words and search " +
+          "again, or use mail_search with a subject filter.";
+      } else {
+        result.note =
+          "Nothing in the global index matched. Only indexed messages are searchable — " +
+          "check x.gloda.stats, or fall back to mail_search with subject/author filters.";
+      }
     }
     return result;
   };
@@ -429,6 +509,7 @@ TBX_MODULE_NAMES.push("gloda");
     return {
       conversationId: conversation.id,
       subject: conversation.subject,
+      participants: participants(messages),
       oldestDate: isoDate(conversation.oldestMessageDate),
       newestDate: isoDate(conversation.newestMessageDate),
       messages: ordered.slice(0, limit),
@@ -519,4 +600,9 @@ TBX_MODULE_NAMES.push("gloda");
     }
     return stats;
   };
+
+  /* Pure helpers, published for the add-on's tests; see the note in core.js. */
+  if (typeof TBX_TEST_HOOKS !== "undefined") {
+    TBX_TEST_HOOKS.gloda = { classifyTerms, folderMatcher, isoDate };
+  }
 }

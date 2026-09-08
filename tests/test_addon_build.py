@@ -74,6 +74,20 @@ def test_every_background_script_ships(built) -> None:
         assert script in names, f"{script} is in the manifest but not in the package"
 
 
+def test_manifest_permissions_are_known_to_thunderbird() -> None:
+    """An unknown permission is not a no-op.
+
+    Thunderbird 155 logs `Error processing permissions.17: Value "messages.tags"`
+    at install time; the real names are messagesTags and messagesTagsList, which
+    are already listed.
+    """
+    import json
+
+    manifest = json.loads((addon_source_dir() / "manifest.json").read_text(encoding="utf-8"))
+    assert "messages.tags" not in manifest["permissions"]
+    assert {"messagesTags", "messagesTagsList"} <= set(manifest["permissions"])
+
+
 def test_build_is_reproducible(tmp_path) -> None:
     first = build_xpi(tmp_path / "a")
     second = build_xpi(tmp_path / "b")
@@ -125,3 +139,25 @@ def test_a_module_that_does_not_announce_itself_is_rejected(tmp_path) -> None:
     )
     with pytest.raises(ValueError, match="TBX_MODULE_NAMES"):
         assemble_implementation(source)
+
+
+def test_the_globals_the_sandbox_lacks_are_imported(built) -> None:
+    """Two things the privileged half needs and the ext-*.js sandbox does not inject.
+
+    A bare `setTimeout` is a ReferenceError there, which surfaces only as a
+    capability that never answers; and without `ExtensionError` every failure
+    reaches the background page as "An unexpected error occurred".
+    """
+    _, _, implementation = built
+    assert "resource://gre/modules/Timer.sys.mjs" in implementation
+    assert "resource://gre/modules/ExtensionUtils.sys.mjs" in implementation
+
+
+def test_nothing_type_checks_a_date_by_instance(built) -> None:
+    """Thunderbird hands the privileged half objects minted in its own realms.
+
+    `value instanceof Date` is false for every Date gloda produces, which is how
+    each search hit came back with `date: null`.
+    """
+    _, _, implementation = built
+    assert "instanceof Date" not in implementation

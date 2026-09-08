@@ -446,10 +446,102 @@ TBX_MODULE_NAMES.push("admin");
       }
     } catch (ex) {
       // A plain nsIConsoleMessage — console.log output and XPCOM warnings — carries
-      // no location, so the text is all there is.
+      // no location, but it does carry its time, and without it the merge below
+      // would file every such line as "oldest" and trim it first.
       record.severity = "message";
+      try {
+        if (entry.timeStamp) {
+          record.at = new Date(entry.timeStamp).toISOString();
+        }
+      } catch (timeError) {
+        // No time at all: the store's own order is the best we have.
+      }
     }
     return record;
+  }
+
+  /** Whether a ConsoleAPI event came from this add-on's own pages.
+   *
+   *  The store is shared by every extension, so an event is ours only when it
+   *  carries our add-on id, or — for pages that report no id — an innerID under
+   *  our moz-extension:// base URL. With no identity recorded yet nothing can be
+   *  claimed, so nothing is. */
+  function ownConsoleEvent(event) {
+    const who = H.extension;
+    if (!who || !event) {
+      return false;
+    }
+    if (event.addonId) {
+      return event.addonId === who.id;
+    }
+    const inner = typeof event.innerID === "string" ? event.innerID : "";
+    return Boolean(who.baseURL) && inner.startsWith(who.baseURL);
+  }
+
+  /** The add-on's own `console.*` output, in the same record shape as the
+   *  nsIConsoleMessage entries.
+   *
+   *  An extension page's console output goes to the ConsoleAPI storage, not to
+   *  Services.console — which is why `tb_console` never showed a single `[tbmcp]`
+   *  line, the one thing it exists to surface. Best effort: a build without the
+   *  service, or one that refuses us, just contributes nothing. */
+  function ownConsoleEvents() {
+    let events;
+    try {
+      events = Cc["@mozilla.org/consoleAPI-storage;1"]
+        .getService(Ci.nsIConsoleAPIStorage)
+        .getEvents();
+    } catch (ex) {
+      return [];
+    }
+    const records = [];
+    for (const event of events || []) {
+      if (!ownConsoleEvent(event)) {
+        continue;
+      }
+      let text;
+      try {
+        text = Array.from(event.arguments || [], (arg) =>
+          typeof arg === "string" ? arg : JSON.stringify(arg)
+        ).join(" ");
+      } catch (ex) {
+        text = `<unreadable console event: ${ex.message || ex}>`;
+      }
+      const record = {
+        message: redact(text),
+        severity: String(event.level || "log"),
+        source: "console",
+      };
+      if (event.timeStamp) {
+        record.at = new Date(event.timeStamp).toISOString();
+      }
+      records.push(record);
+    }
+    return records;
+  }
+
+  /** Records from both stores in time order, newest last.
+   *
+   *  An entry with no time keeps its position relative to its neighbours by
+   *  borrowing the time of the previous entry in its own store — the store is
+   *  already chronological, so that is where it belongs, and it can never be
+   *  pushed to the front where `limit` would trim it away. */
+  function mergedConsole(entries) {
+    const stamped = (records, offset) => {
+      let last = 0;
+      return records.map((record, index) => {
+        const parsed = record.at ? Date.parse(record.at) : NaN;
+        if (Number.isFinite(parsed)) {
+          last = parsed;
+        }
+        return { record, index: offset + index, time: last };
+      });
+    };
+    const rows = stamped(entries.map(describeConsoleEntry), 0).concat(
+      stamped(ownConsoleEvents(), entries.length)
+    );
+    rows.sort((a, b) => a.time - b.time || a.index - b.index);
+    return rows.map((row) => row.record);
   }
 
   TBX_MODULES["admin.consoleMessages"] = async (params) => {
@@ -461,20 +553,19 @@ TBX_MODULE_NAMES.push("admin");
     } catch (ex) {
       throw H.unsupported(`the error console is not readable: ${ex.message || ex}`);
     }
+    const records = mergedConsole(entries);
     const matched = [];
-    for (const entry of entries) {
-      const record = describeConsoleEntry(entry);
+    for (const record of records) {
       if (filter && !record.message.toLowerCase().includes(filter)) {
         continue;
       }
       matched.push(record);
     }
-    // Newest last: that is the order the console keeps them in, and reading a tail
-    // top to bottom is how anyone actually debugs.
+    // Newest last: reading a tail top to bottom is how anyone actually debugs.
     return {
       messages: matched.slice(-limit),
       matched: matched.length,
-      buffered: entries.length,
+      buffered: records.length,
       filter: params.filter || null,
     };
   };

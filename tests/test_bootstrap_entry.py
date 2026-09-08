@@ -38,7 +38,7 @@ def test_module_imports_without_the_package_on_the_path(tmp_path):
         env=env,
     )
     assert done.returncode == 0, done.stderr
-    assert "1.2.0" in done.stdout
+    assert "1.3.0" in done.stdout
 
 
 def test_root_shim_exists_and_delegates():
@@ -66,7 +66,7 @@ def test_root_shim_actually_runs_and_produces_the_five_key_contract(tmp_path):
     assert done.returncode in (0, 1), done.stderr
     payload = json.loads(done.stdout)
     assert set(payload) == {"ok", "version", "launcher", "steps", "next_command"}
-    assert payload["version"] == "1.2.0"
+    assert payload["version"] == "1.3.0"
     assert payload["steps"]  # ran the real step sequence, not a stub
 
 
@@ -92,7 +92,7 @@ def test_main_returns_nonzero_when_a_step_fails(monkeypatch, capsys):
     monkeypatch.setattr(
         module,
         "bootstrap",
-        lambda options, **kw: module.Report(False, "1.2.0", None, [], "tbmcp doctor"),
+        lambda options, **kw: module.Report(False, "1.3.0", None, [], "tbmcp doctor"),
     )
     assert module.main(["--json"]) == 1
     assert '"ok": false' in capsys.readouterr().out
@@ -110,7 +110,7 @@ def test_main_exits_zero_for_a_clean_dry_run(monkeypatch, capsys):
     monkeypatch.setattr(
         module,
         "bootstrap",
-        lambda options, **kw: module.Report(False, "1.2.0", None, steps, "python bootstrap.py"),
+        lambda options, **kw: module.Report(False, "1.3.0", None, steps, "python bootstrap.py"),
     )
     assert module.main(["--dry-run", "--json"]) == 0
     out = capsys.readouterr().out
@@ -130,7 +130,7 @@ def test_main_still_exits_nonzero_when_a_dry_run_step_failed(monkeypatch, capsys
         module,
         "bootstrap",
         lambda options, **kw: module.Report(
-            False, "1.2.0", None, steps, "python bootstrap.py --python <path>"
+            False, "1.3.0", None, steps, "python bootstrap.py --python <path>"
         ),
     )
     assert module.main(["--dry-run", "--json"]) == 1

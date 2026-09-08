@@ -70,7 +70,9 @@ def register(reg: Registrar) -> None:
         `full_text` uses Thunderbird's global index and searches headers and bodies
         of already-indexed messages; `subject`/`author`/`body` are substring matches
         evaluated per folder. Dates are ISO-8601. Results are summaries — call
-        `mail_get` for a body. Continue with `cursor=nextCursor`.
+        `mail_get` for a body. Continue with `cursor=nextCursor`. A first page
+        carries `scope` — the folder and account ids the query covered — so an empty
+        result can be read against what was actually searched.
         """
         query: dict[str, Any] = {}
         if full_text:
@@ -132,12 +134,18 @@ def register(reg: Registrar) -> None:
             },
             timeout=90.0,
         )
+        # A null field reads to a model as a fact about the mailbox, so anything
+        # the add-on did not send is left out rather than sent as null. `scope`
+        # comes with a first page only; a continuation is by definition the same
+        # search.
+        reported = {
+            key: result[key] for key in ("scope", "indexNote") if result.get(key) is not None
+        }
         return page(
             [message_summary(m) for m in result.get("messages", [])],
             cursor=result.get("cursor"),
             total=result.get("totalAvailable"),
-            searchedFolders=result.get("searchedFolders"),
-            indexNote=result.get("indexNote"),
+            **reported,
         )
 
     @reg.read_tool(title="List a folder")

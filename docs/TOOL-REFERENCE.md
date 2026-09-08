@@ -18,7 +18,9 @@ Search the user's mail. Combine `full_text` with any filters below.
 `full_text` uses Thunderbird's global index and searches headers and bodies
 of already-indexed messages; `subject`/`author`/`body` are substring matches
 evaluated per folder. Dates are ISO-8601. Results are summaries — call
-`mail_get` for a body. Continue with `cursor=nextCursor`.
+`mail_get` for a body. Continue with `cursor=nextCursor`. A first page
+carries `scope` — the folder and account ids the query covered — so an empty
+result can be read against what was actually searched.
 
 Parameters: full_text, subject, author, recipients, body, folder_id, account_id, include_subfolders, unread, flagged, junk, has_attachment, tags, tag_mode, from_date, to_date, to_me, from_me, min_size, max_size, limit, cursor  
 *(bold means required; `confirm` is the confirmation gate)*
@@ -391,6 +393,13 @@ conversation id you can pass to `search_conversation`. For precise filters
 
 If this returns nothing unexpectedly, call `search_index_status`: the global
 indexer can be disabled or still catching up.
+
+`matched` is how many of the retrieved messages matched, and it is the
+total only when `truncated` is absent; a truncated search ranked as deep
+as it could and there may be more below. `unmatchableTerms` names words
+the index cannot look up at all — anything that breaks into pieces of
+fewer than three characters, like "2.0" — and because every term has to
+match, one of those is enough to empty the result.
 
 Parameters: **query**, limit, offset, folder_id  
 *(bold means required; `confirm` is the confirmation gate)*
@@ -1206,6 +1215,9 @@ Recent lines from Thunderbird's error console, newest last.
 Narrow it with `contains` — `tbmcp` shows this bridge's own complaints, and an
 add-on id or a source filename shows someone else's. Anything shaped like a
 password or token is redacted inside Thunderbird before it is sent.
+
+Lines the bridge writes with `console.*` (`source: "console"`) are included
+alongside the error console's own entries, merged by time.
 
 Parameters: contains, limit  
 *(bold means required; `confirm` is the confirmation gate)*

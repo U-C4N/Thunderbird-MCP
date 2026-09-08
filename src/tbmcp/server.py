@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import importlib
 import inspect
 import logging
@@ -9,11 +10,13 @@ from collections.abc import Callable
 from typing import Any, TypeVar
 
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
 from . import safety
 from .bridge import Bridge, set_shared_bridge
 from .config import ALL_TOOLSETS, Settings
+from .errors import TbmcpError
 
 log = logging.getLogger("tbmcp.server")
 
@@ -47,6 +50,27 @@ Notes that will save you a round trip:
 """
 
 
+def _as_tool_error(fn: F) -> F:
+    """Wrap a tool so the failures it raises on purpose reach the model.
+
+    The SDK tells a deliberate `ToolError` from a crash, and mcp >= 2.1 withholds a
+    crash's text entirely: the model is handed "Error executing tool <name>" and
+    nothing else, so a `UsageError` naming the parameter to fix arrived with nothing
+    to act on. Re-raising ours as `ToolError` keeps the message (both supported
+    versions prefix it with the tool name and keep the rest) and keeps a traceback out
+    of the log for something we decided ourselves. Anything else is still a crash.
+    """
+
+    @functools.wraps(fn)
+    async def guarded(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return await fn(*args, **kwargs)
+        except TbmcpError as exc:
+            raise ToolError(str(exc)) from exc
+
+    return guarded  # type: ignore[return-value]
+
+
 class Registrar:
     """Registers tools with consistent annotations, and drops writes in read-only mode."""
 
@@ -69,7 +93,7 @@ class Registrar:
             self.skipped.append(fn.__name__)
             return fn
         self.mcp.add_tool(
-            fn,
+            _as_tool_error(fn),
             title=title,
             # Normalise the docstring ourselves rather than letting the interpreter
             # decide: CPython 3.13 strips common leading whitespace from `__doc__` at
@@ -175,4 +199,4 @@ def _version() -> str:
 
         return version("thunderbird-mcp")
     except Exception:
-        return "1.2.1"
+        return "1.3.0"

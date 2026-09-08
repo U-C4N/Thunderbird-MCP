@@ -173,7 +173,7 @@ def test_json_is_machine_readable(tmp_path):
     report = bootstrap(Options(venv=tmp_path / "venv", dry_run=True), run=recorder.run)
     payload = json.loads(report.to_json())
     assert payload["ok"] is False  # dry run: see test_dry_run_is_never_reported_ok
-    assert payload["version"] == "1.2.0"
+    assert payload["version"] == "1.3.0"
     assert [s["name"] for s in payload["steps"]] == STEPS
     assert set(payload) == {"ok", "version", "launcher", "steps", "next_command"}
 

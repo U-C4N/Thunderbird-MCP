@@ -22,9 +22,19 @@
 
 "use strict";
 
+/* ------------------------------------------------------------------- timers */
+
+/* The sandbox has no DOM globals, so the bare `setTimeout` every deadline here
+ * used to call was a ReferenceError: it rejected the deadline promise before the
+ * work it guarded had started, which took out gloda search entirely. Chrome code
+ * gets its timers from the platform's Timer module instead. */
+const { setTimeout, clearTimeout } = ChromeUtils.importESModule(
+  "resource://gre/modules/Timer.sys.mjs"
+);
+
 /* ------------------------------------------------------------------ modules */
 
-/** Module URLs as they exist on Thunderbird 128–153. Resolution is lazy so a
+/** Module URLs as they exist on Thunderbird 128–155. Resolution is lazy so a
  *  rename in a future release degrades one capability instead of the add-on. */
 const MODULE_URLS = {
   ExtensionPermissions: "resource://gre/modules/ExtensionPermissions.sys.mjs",
@@ -46,6 +56,7 @@ const MODULE_URLS = {
   AddonManager: "resource://gre/modules/AddonManager.sys.mjs",
   NetUtil: "resource://gre/modules/NetUtil.sys.mjs",
   FileUtils: "resource://gre/modules/FileUtils.sys.mjs",
+  ExtensionUtils: "resource://gre/modules/ExtensionUtils.sys.mjs",
 };
 
 const _moduleCache = new Map();
@@ -220,16 +231,79 @@ const H = {
     }
   },
 
+  /** Who we are, recorded by getAPI() because `context` reaches nowhere else.
+   *
+   *  `admin.consoleMessages` needs it to tell our own console output apart from
+   *  every other add-on's in the shared ConsoleAPI store. Undefined until the API
+   *  is built, so anything reading it must cope with that. */
+  extension: null,
+
   /** Wrap a callback-style Thunderbird API as a promise with a deadline. */
   withTimeout(promise, ms, what) {
-    return Promise.race([
-      promise,
-      new Promise((_resolve, reject) =>
-        setTimeout(() => reject(new Error(`${what} timed out after ${ms}ms`)), ms)
-      ),
-    ]);
+    let timer = null;
+    const deadline = new Promise((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(`${what} timed out after ${ms}ms`)), ms);
+    });
+    // Whichever way the race lands, the timer has to go: an armed one holds the
+    // deadline's rejection alive and keeps Thunderbird awake for nothing.
+    return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
   },
 };
+
+/* ---------------------------------------------------------- errors on the wire */
+
+/** Marks a message as carrying our envelope; background/registry.js unpacks it. */
+const TBX_ERROR_TAG = "tbxerr:";
+
+/**
+ * Re-mint a failure as something that survives the hop to the background page.
+ *
+ * `ExtensionCommon.normalizeError` keeps a message only for a plain object, an
+ * `ExtensionError`, or an error whose principal the extension subsumes. Ours is
+ * none of those — a plain `Error` minted with the system principal — so the
+ * background page was handed "An unexpected error occurred" and the whole
+ * taxonomy was lost. Serialise it into the one field that does get through.
+ */
+function wireError(ex) {
+  const payload = {
+    kind: (ex && ex.tbxKind) || "thunderbird",
+    message: String((ex && ex.message) || ex),
+    // A bare "Error" name says nothing; a subclass or an explicit code does.
+    code: (ex && ex.code) || (ex && ex.name && ex.name !== "Error" ? ex.name : null),
+  };
+  if (ex && ex.needs !== undefined && ex.needs !== null) {
+    payload.needs = [].concat(ex.needs);
+  }
+  const message = TBX_ERROR_TAG + JSON.stringify(payload);
+  const utils = mod("ExtensionUtils");
+  if (utils && utils.ExtensionError) {
+    return new utils.ExtensionError(message);
+  }
+  // The other shape normalizeError trusts. Worth keeping: without ExtensionError
+  // every privileged failure would go back to being unreadable.
+  return { message };
+}
+
+/**
+ * Put every method of the API surface behind `wireError`.
+ *
+ * Applied once to the whole namespace rather than method by method, so a method
+ * added later cannot forget: the boundary is a property of the surface, not of
+ * any one call. `invoke` therefore does no wrapping of its own.
+ */
+function wired(api) {
+  const out = {};
+  for (const [name, fn] of Object.entries(api)) {
+    out[name] = async (...args) => {
+      try {
+        return await fn(...args);
+      } catch (ex) {
+        throw wireError(ex);
+      }
+    };
+  }
+  return out;
+}
 
 /* --------------------------------------------------------------- dispatch table */
 
@@ -262,8 +336,18 @@ this.tbx = class extends ExtensionAPI {
   }
 
   getAPI(context) {
+    // The only place the privileged half ever sees its own identity; keep it
+    // where the modules can reach it (see H.extension).
+    try {
+      H.extension = {
+        id: context.extension.id,
+        baseURL: String(context.extension.baseURL || ""),
+      };
+    } catch (ex) {
+      H.extension = null;
+    }
     return {
-      tbx: {
+      tbx: wired({
         /* -------------------------------------------------- bridge plumbing */
 
         async readBridgeFile() {
@@ -468,7 +552,15 @@ this.tbx = class extends ExtensionAPI {
           }
           return handler(params || {});
         },
-      },
+      }),
     };
   }
 };
+
+/* Block-scoped helpers, published for the add-on's tests.
+ *
+ * `TBX_TEST_HOOKS` does not exist in Thunderbird, so this statement is a no-op
+ * there — which is the point: no test-only branch ships inside a handler. */
+if (typeof TBX_TEST_HOOKS !== "undefined") {
+  TBX_TEST_HOOKS.core = { H, mod, needMod, wireError, handlers: TBX_MODULES };
+}

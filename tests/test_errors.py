@@ -8,6 +8,7 @@ from a broken install.
 
 from __future__ import annotations
 
+from tbmcp.daemon import error_payload
 from tbmcp.errors import (
     BlockedError,
     NotConnectedError,
@@ -63,3 +64,38 @@ def test_usage_errors_read_as_instructions() -> None:
     error = UsageError("subject is required", hint="pass subject")
     assert "subject is required" in str(error)
     assert "pass subject" in str(error)
+
+
+# --------------------------------------------------------- relaying, without echoes
+
+#: What the add-on puts on the wire for a refused delete.
+WIRE = {
+    "kind": "blocked",
+    "code": "NEEDS_CONSENT",
+    "message": "refusing to delete 40 messages",
+    "needs": ["confirm=true"],
+}
+
+
+def test_relaying_an_error_leaves_it_unchanged() -> None:
+    """The daemon used to serialise `str(exc)`, which already renders the code and the
+    `needs` list into the text for humans. Every hop therefore appended them again, and
+    a caller saw "... [NOT_CONNECTED] [NOT_CONNECTED]". Relaying has to be idempotent.
+    """
+    once = error_payload(from_wire("mail_delete", WIRE))
+    assert once == WIRE
+    twice = error_payload(from_wire("mail_delete", once))
+    assert twice == WIRE
+
+
+def test_a_twice_relayed_error_still_reads_once() -> None:
+    rebuilt = from_wire("mail_delete", error_payload(from_wire("mail_delete", WIRE)))
+    text = str(rebuilt)
+    assert text.count("requires:") == 1
+    assert text.count("NEEDS_CONSENT") == 1
+
+
+def test_an_untyped_failure_keeps_its_text() -> None:
+    """Anything the daemon did not raise deliberately is still worth relaying: a hidden
+    JSON-RPC error looks like a hang from the user's side."""
+    assert error_payload(RuntimeError("x")) == {"kind": "internal", "code": None, "message": "x"}

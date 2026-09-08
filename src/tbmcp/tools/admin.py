@@ -13,6 +13,7 @@ guess at a timeout.
 from typing import Any, Literal
 
 from ..errors import TbmcpError
+from ..handshake import describe_handshake
 from ..safety import DESTRUCTIVE, Gate, guard_write, large_output, require
 from ..server import Registrar
 from ._common import call, changed, clamp, one_of, page
@@ -52,9 +53,13 @@ def register(reg: Registrar) -> None:
             "inFlightCalls": thunderbird.get("inFlight"),
             "profile": result.get("profile"),
             "daemon": result.get("daemon"),
+            # What the add-on's connection attempts did, welcomed or not. "Not
+            # connected" and "connecting twice a minute and failing" need opposite
+            # advice, and only this tells them apart.
+            "handshake": result.get("handshake"),
         }
         if not payload["connected"]:
-            payload["hint"] = NOT_CONNECTED_HINT
+            payload["hint"] = describe_handshake(result.get("handshake")) or NOT_CONNECTED_HINT
         elif payload["privilegedHalf"] is False:
             payload["hint"] = NO_EXPERIMENT_HINT
         return payload
@@ -121,9 +126,10 @@ def register(reg: Registrar) -> None:
             "daemon": status.get("daemon"),
             "profile": status.get("profile"),
             "thunderbird": status.get("thunderbird"),
+            "handshake": status.get("handshake"),
         }
         if not payload["connected"]:
-            payload["hint"] = NOT_CONNECTED_HINT
+            payload["hint"] = describe_handshake(status.get("handshake")) or NOT_CONNECTED_HINT
             return payload
         try:
             payload.update(await call("x.admin.diagnostics", timeout=60.0))
@@ -139,6 +145,9 @@ def register(reg: Registrar) -> None:
         Narrow it with `contains` — `tbmcp` shows this bridge's own complaints, and an
         add-on id or a source filename shows someone else's. Anything shaped like a
         password or token is redacted inside Thunderbird before it is sent.
+
+        Lines the bridge writes with `console.*` (`source: "console"`) are included
+        alongside the error console's own entries, merged by time.
         """
         result = await call(
             "x.admin.consoleMessages",
