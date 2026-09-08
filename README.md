@@ -1,222 +1,85 @@
 [![CI](https://github.com/U-C4N/Thunderbird-MCP/actions/workflows/ci.yml/badge.svg)](https://github.com/U-C4N/Thunderbird-MCP/actions/workflows/ci.yml)
-[![Python](https://img.shields.io/badge/python-3.11%20%E2%80%93%203.14-blue)](https://www.python.org/)
-[![MCP SDK](https://img.shields.io/badge/MCP%20SDK-2.0-6E56CF)](https://github.com/modelcontextprotocol/python-sdk)
+[![Release](https://img.shields.io/badge/release-v1.3.0-0A84FF)](https://github.com/U-C4N/Thunderbird-MCP/releases/tag/v1.3.0)
 [![Thunderbird](https://img.shields.io/badge/Thunderbird-128%20%E2%80%93%20155-0A84FF)](https://www.thunderbird.net/)
+[![Python](https://img.shields.io/badge/python-3.11%20%E2%80%93%203.14-blue)](https://www.python.org/)
 [![Tools](https://img.shields.io/badge/tools-112-brightgreen)](docs/TOOL-REFERENCE.md)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Stars](https://img.shields.io/github/stars/U-C4N/Thunderbird-MCP?style=flat)](https://github.com/U-C4N/Thunderbird-MCP/stargazers)
 
 # Thunderbird MCP
 
-Thunderbird MCP gives an AI agent real control of the Thunderbird already running on
-your machine — your mail, your folders, your contacts, your calendar, your filters,
-and your actual settings. Not a copy, not an IMAP re-implementation: the same
-Thunderbird you have open, driven through its own internals.
+An MCP server that lets an AI agent drive the Thunderbird already running on your
+machine — mail, folders, contacts, calendar, filters and settings — through
+Thunderbird's own internals. Not a copy of your mailbox and not an IMAP client: the
+same Thunderbird you have open.
 
-Written in Python, built for **Claude Code** and **Codex CLI**, and able to drive one
-Thunderbird from both at the same time.
+Built for **Claude Code** and **Codex CLI**, and able to serve both at once.
 
-**1.3.0** (2026-09-08) makes every search tool work again, stops paging from
-dropping messages, and teaches the bridge to say what is wrong when it cannot
-connect. Full list in [CHANGELOG.md](CHANGELOG.md).
+## What is new in 1.3.0
 
-### What you can ask for
+- **Search works.** Every search tool in 1.2.0 was broken by six separate defects
+  (reported in [#3](https://github.com/U-C4N/Thunderbird-MCP/issues/3)). `mail_search`,
+  `search_global` and `search_conversation` now return results, dates, scores and
+  participants, and folder scoping actually scopes.
+- **Paging keeps every message.** A cursor no longer skips the rest of the page it
+  stopped in.
+- **Errors mean something.** No more "An unexpected error occurred": a failure says
+  what to change, on every `mcp` SDK version, and a large answer no longer drops the
+  connection.
+- **The bridge explains itself.** `tb_status` and `tbmcp doctor` report both sides of
+  the connection, name the remedy, warn when the installed add-on is older than the
+  package, and point at the daemon's log.
+- **Tests that see the add-on.** 111 node tests run the real add-on scripts; 288
+  Python tests; CI on Windows, macOS and Linux with Python 3.11–3.14.
 
-- **Find things you half-remember.** "What did the accountant say about VAT in June?"
-  runs a ranked search over the whole indexed corpus and can reconstruct a thread that
-  spans Inbox, Sent and an archive folder in one call.
-- **Triage a mailbox.** Mark, tag, move, archive and file in bulk — with the source
-  folders reported back so a wrong move is reversible.
-- **Write mail you get to read first.** `mail_send` produces a reviewable **draft** by
-  default; sending is a separate, confirmed step, and needs no compose window.
-- **Change settings, properly.** Server ports and connection security, identities and
-  signatures, SMTP servers, junk handling, archive layout, message-pane layout,
-  ~5,700 preferences — read the current value, write the new one, and get the old one
-  back so you can undo it.
-- **Automate the boring rules.** Create and reorder message filters, then run them
-  over an existing folder to check they do what you meant.
-- **Keep a calendar honest.** Events and tasks, with recurring items addressed as a
-  series unless you name one occurrence.
-- **Find out why it is not working.** `tb_status`, `tb_diagnostics` and `tbmcp doctor`
-  report both sides of the bridge — whether the add-on is connecting, whether it is
-  completing the handshake, and which add-on version is actually installed — and name
-  the remedy instead of guessing.
-
-> [!NOTE]
-> Everything documented here was verified against a live **Thunderbird 155** on
-> Windows 11, not inferred from documentation. The measurements, and the traps found
-> the hard way, are in [docs/VERIFIED-FINDINGS.md](docs/VERIFIED-FINDINGS.md).
-
----
+Details in [CHANGELOG.md](CHANGELOG.md).
 
 ## Quick start
-
-There is no PyPI package to install from yet — clone the repo and let it build its
-own environment:
 
 ```bash
 git clone https://github.com/U-C4N/Thunderbird-MCP
 cd Thunderbird-MCP
-python bootstrap.py
+python bootstrap.py --clients claude-code,codex
 ```
 
-One command: it picks an interpreter that works, builds the environment, installs
-the add-on, and verifies the whole chain before it returns. Re-running it is safe —
-healthy steps are no-ops. Add `--clients claude-code,codex` to also register those
-clients in the same run, or do it afterward from "Install into a client" below.
+One command builds the environment, installs the add-on (Thunderbird restarts
+once), registers the clients you name and verifies the chain. Re-running it is safe.
+Agents can parse `python bootstrap.py --json` instead of the human output.
 
-Installing the add-on closes Thunderbird, installs through Thunderbird's own
-automation channel, and starts it again — no clicking through the Add-ons UI;
-`bootstrap` does this for you as its `addon` step. Prefer to do it by hand, or on its
-own? `tbmcp install-addon --manual` builds the package and prints the three clicks.
+Then ask your agent something — *"what did the accountant say about VAT in June?"*,
+*"archive everything from newsletters older than a month"*, *"draft a reply to the
+last mail from Ali and let me read it first"*.
 
-Already installed? `tbmcp bootstrap` does the same thing.
+Prefer to register a client by hand? `tbmcp setup --print-config all` prints the
+exact block for Claude Code, Codex, Claude Desktop, Cursor, VS Code, Gemini CLI and
+Zed. Use `python -m tbmcp serve` as the command, with an absolute interpreter path.
 
-### For AI agents
+## What you can do
 
-```bash
-python bootstrap.py --json
-```
+| | |
+| --- | --- |
+| **Find** | ranked full-text search across every account, threads rebuilt across Inbox, Sent and archives, substring filters by folder, sender, date, tag |
+| **Triage** | mark, tag, move, archive, file in bulk — with the source folder reported so a wrong move is reversible |
+| **Write** | `mail_send` produces a reviewable draft by default; sending is a separate, confirmed step |
+| **Configure** | server ports and security, identities and signatures, SMTP servers, junk handling, ~5,700 preferences — every write reports the old value so it can be undone |
+| **Automate** | create, reorder and run message filters; events and tasks on the calendar |
+| **Diagnose** | `tb_status`, `tb_diagnostics`, `tb_console` and `tbmcp doctor` say what is wrong and what to do |
 
-Emits one object: `ok`, `version`, `launcher`, `steps[]` (each with `name`,
-`status`, `seconds`, `detail`), and `next_command` — null on success, otherwise the
-single command that addresses the failure. `status` is one of `ok`, `repaired`,
-`skipped`, `failed`. Parse this instead of the human output; the columns are not a
-stable interface and the JSON is.
+## Safety
 
-A healthy `doctor` looks like this:
-
-```
-thunderbird-mcp doctor
-
-Python
-  version                    3.14.6
-  interpreter                C:\Users\VECTOR\Documents\GitHub\Thunderbird-MCP\.venv\Scripts\python.exe
-
-Thunderbird
-  executable                 C:\Program Files\Mozilla Thunderbird\thunderbird.exe
-  running                    True
-  add-on version (source)    1.3.0
-  add-on version (installed) 1.3.0
-  profile                    C:\Users\VECTOR\AppData\Roaming\Thunderbird\Profiles\81l4u5ba.default-release
-  accounts (from prefs.js)   3
-  outgoing servers           2
-  global index db            True
-  add-on startup report      2026-09-08T16:22:20.621Z
-  privileged modules         12 loaded
-  bridge methods             128
-
-Bridge
-  daemon                     pid 54640
-  daemon log                 C:\Users\VECTOR\AppData\Local\tbmcp\daemon.log
-  connected                  True
-  add-on version (live)      1.3.0
-  privileged half            True
-  app                        Thunderbird 155.0
-  add-on handshakes          1 attempt; last welcomed 0 s ago (Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:155.0) Gecko/20100101 Thunderbird/155.0)
-  add-on transport           connected; 0 failed attempts
-  tb_status tool call        connected
-
-Tools
-  toolsets                   mail,folders,compose,search,admin
-  read-only                  False
-  send mode                  draft
-```
-
----
-
-## Install into a client
-
-<details>
-<summary><b>Claude Code</b></summary>
-
-```bash
-tbmcp setup claude-code --toolsets all
-```
-
-Or by hand — note the absolute path, because Claude Code spawns without a shell and
-has no `cwd` setting:
-
-```bash
-claude mcp add-json thunderbird '{
-  "type": "stdio",
-  "command": "C:\\Users\\you\\Thunderbird-MCP\\.venv\\Scripts\\python.exe",
-  "args": ["-m", "tbmcp", "serve", "--toolsets", "all"],
-  "env": { "PYTHONUTF8": "1", "PYTHONUNBUFFERED": "1" }
-}' --scope user
-```
-
-`bootstrap` picks this for you and tests it first — write it by hand only if you know
-the console script runs on your machine. Where Windows Application Control blocks
-pip's console shims (`thunderbird-mcp.exe`), a config that points at it produces a
-client that times out with nothing to point at; `python -m tbmcp` always works.
-
-Verify with `claude mcp get thunderbird`, or `/mcp` inside a session.
-
-> [!TIP]
-> Run `claude mcp add` from PowerShell or CMD. Git Bash rewrites `/c` into `C:/` and
-> corrupts the written config; if you must use it, prefix with `MSYS_NO_PATHCONV=1`.
-
-</details>
-
-<details>
-<summary><b>Codex CLI</b></summary>
-
-```bash
-tbmcp setup codex --toolsets all
-```
-
-Or by hand in `~/.codex/config.toml`:
-
-```toml
-[mcp_servers.thunderbird]
-command = 'C:\Users\you\Thunderbird-MCP\.venv\Scripts\python.exe'
-args = ["-m", "tbmcp", "serve", "--toolsets", "all"]
-env = { PYTHONUTF8 = "1", PYTHONUNBUFFERED = "1" }
-startup_timeout_sec = 60
-tool_timeout_sec = 120
-
-# Codex ignores tool annotations, so safety has to be stated here.
-default_tools_approval_mode = "writes"
-[mcp_servers.thunderbird.tools.pref_set]
-approval_mode = "approve"
-[mcp_servers.thunderbird.tools.mail_send]
-approval_mode = "approve"
-```
-
-`bootstrap` picks this for you and tests it first — write it by hand only if you know
-the console script runs on your machine. Windows paths must be **single-quoted** TOML
-literals — `"C:\Users\…"` is an invalid escape sequence. Codex also builds the child
-environment from scratch, so anything your server needs has to be in `env`. Verify
-with `codex mcp get thunderbird --json`.
-
-</details>
-
-<details>
-<summary><b>Claude Desktop, Cursor, VS Code, Gemini CLI, Zed</b></summary>
-
-```bash
-tbmcp setup claude-desktop cursor vscode gemini zed
-tbmcp setup --print-config all      # or just show the blocks and change nothing
-```
-
-`setup` prefers each client's own CLI when it is on PATH, falls back to editing the
-config file, backs it up first, and reports *added / updated / unchanged* per client.
-It never hand-edits `~/.claude.json`, which holds OAuth state and project trust
-decisions.
-
-</details>
-
----
+Reads are unrestricted. Anything that sends, deletes or changes configuration needs
+`confirm=true`, carries `destructiveHint`, and prompts for approval on clients that
+support elicitation. `mail_send` drafts unless told `mode="send"`; `dry_run_only`
+previews a write; preference writes are allowlisted and credentials, proxy and
+security prefs are refused at both layers. `--read-only` registers no mutating tool
+at all.
 
 ## Toolsets
 
-Tools are grouped so you only pay context for what you use. The default set is lean;
-add the rest with `--toolsets`.
+Tools are grouped so an agent only pays context for what it uses. The default set is
+`mail`, `folders`, `compose`, `search` and `admin`; add the rest with `--toolsets`.
 
 ```bash
 tbmcp serve --toolsets all              # everything
-tbmcp serve --toolsets mail,settings    # exactly these
 tbmcp serve --toolsets +calendar        # the default set plus one
 tbmcp tools --toolsets all              # list what would be registered
 ```
@@ -419,55 +282,7 @@ Full signatures in [docs/TOOL-REFERENCE.md](docs/TOOL-REFERENCE.md).
 
 <!-- END GENERATED TOOL CATALOGUE -->
 
----
-
-## Safety
-
-Reads are unrestricted. Anything that sends, deletes, or changes configuration is
-gated four ways, because no single mechanism exists on every client:
-
-| Layer | Effect | Present on |
-| --- | --- | --- |
-| `readOnlyHint` / `destructiveHint` annotations | lets the host decide when to ask | hosts that read annotations |
-| `anthropic/requiresUserInteraction` | prompts even under `bypassPermissions` | Claude Code |
-| an explicit `confirm=true` argument | the call is refused without it | everything, including Codex |
-| an approval prompt via elicitation | a real question, and **invisible in the tool schema** so a model cannot fabricate the answer | clients with elicitation |
-
-Beyond the gate:
-
-- **`mail_send` drafts by default.** `--send` or `mode="send"` changes that.
-- **`dry_run_only=true`** previews a write — including what it would replace — without
-  asking for approval and without touching anything.
-- **Every write reports the previous value**, which is what makes an undo possible
-  without a transaction log.
-- **Preference writes are allowlisted.** `--unsafe-prefs` widens the allowlist, but
-  credentials, `network.proxy.*`, `security.*` and the add-on trust model are refused
-  outright — at the Python layer *and* again in the privileged module, which is the
-  only layer with real privilege.
-- **Private keys never move.** OpenPGP keys can be listed and public keys exported;
-  asking for secret key material is refused by design.
-- **`--read-only`** registers no mutating tools at all, which makes a safe second
-  registration easy.
-- **`--yolo`** removes every gate. It exists for scripted use. Do not leave it on.
-
----
-
 ## How it works
-
-Thunderbird has no external API, so anything that drives it has to run *inside* it.
-The official MailExtension API is large — 250 functions on 153 — but it cannot touch
-preferences, account or server configuration, message filters, junk training, virtual
-folders, or the calendar. So the add-on pairs that API with a **WebExtension
-Experiment API**, which runs with the system principal and therefore has full XPCOM
-access. Release Thunderbird builds ship `MOZ_REQUIRE_SIGNING=false` and default
-`extensions.experiments.enabled=true`, so the unsigned bridge installs and gets those
-privileges on a stock install.
-
-Python listens and the add-on dials out, rather than embedding an HTTP server in
-Thunderbird. That needs no port bound inside Thunderbird and no firewall exception,
-survives Thunderbird restarts, works unchanged under Snap and Flatpak, and vendors no
-MPL-licensed Mozilla code. A small broker daemon owns the single connection, which is
-what lets two clients share one Thunderbird.
 
 ```
   Claude Code ──stdio──▶ tbmcp serve ─┐
@@ -476,117 +291,67 @@ what lets two clients share one Thunderbird.
                                                     multiplexes clients      Thunderbird
 ```
 
-The daemon picks a free port and writes `<profile>/tbmcp-bridge.json` with a token;
-the add-on reads it with privileged file I/O and authenticates on connect. Nothing is
-ever bound to a non-loopback interface.
+Thunderbird has no external API, so an add-on runs inside it: the official
+MailExtension API for mail and folders, plus a WebExtension Experiment for what that
+API cannot reach (preferences, accounts, filters, calendar). Python listens on
+loopback and the add-on dials out with a token from `<profile>/tbmcp-bridge.json`, so
+nothing is bound inside Thunderbird and nothing leaves the machine. A small daemon
+owns the one connection and shares it between clients.
 
-Full detail in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and
+More in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and
 [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
----
+## When something is wrong
+
+Run `tbmcp doctor`. It checks every link — Python, the profile, the add-on that is
+installed versus the one in this package, the daemon, the handshake from both sides —
+and names the broken one with the command that fixes it.
+
+| Symptom | What to do |
+| --- | --- |
+| "Thunderbird is not connected" | start Thunderbird; if it is running, `tbmcp doctor` says why the add-on has not attached |
+| the add-on connects but never completes the handshake | restart Thunderbird; `doctor` shows both views and the daemon log's path |
+| `doctor` warns the installed add-on is older than the package | `tbmcp install-addon` |
+| settings tools fail, mail tools work | the privileged half did not load → `tbmcp install-addon` |
+| full-text search finds nothing | the global indexer is off (Settings → General), or `search_global` names the words the index cannot match |
+| a dependency fails to load on Windows | Windows Application Control blocked a wheel; `python bootstrap.py` repairs it |
+
+`TBMCP_DEBUG=1` logs verbosely to stderr; `TBMCP_STATE_DIR` moves the daemon's
+files; `tb_console` returns the add-on's `[tbmcp]` lines as a tool.
 
 ## Requirements
 
-- Thunderbird 128 or newer — developed and verified against **155**
-- Python 3.11 to 3.14
-- Windows, macOS or Linux, including Snap and Flatpak Thunderbird
-
----
-
-## Troubleshooting
-
-`tbmcp doctor` checks each link in the chain and names the one that is broken. The
-add-on also writes `<profile>/tbmcp-addon-status.json` at startup — which privileged
-modules loaded, how many bridge methods exist, which capabilities Thunderbird actually
-granted — and `doctor` reads it. Its absence, on an add-on that is installed and
-active, is itself the diagnosis.
-
-| Symptom | Cause |
-| --- | --- |
-| "Thunderbird is not connected" | Thunderbird is closed, or the add-on is not installed |
-| the add-on connects but never completes the handshake (`tb_status` and `doctor` say so) | restart Thunderbird; `doctor` shows the daemon's view (`add-on handshakes`) and the add-on's (`add-on transport`), and `<state dir>/tbmcp/daemon.log` has the rest |
-| `doctor` warns the installed add-on is older than the package | `tbmcp install-addon` and restart Thunderbird |
-| "the add-on never wrote its startup report" | the privileged half did not load → `tbmcp install-addon` again |
-| settings tools fail but mail tools work | same cause; check `privileged modules` in `doctor` |
-| full-text search finds nothing | Thunderbird's global indexer is off (Settings → General) |
-| raw message source unavailable on IMAP | the message is not stored offline → `folder_sync_offline` |
-| the first tool call after a killed daemon fails | the add-on reattaches within a few seconds once a new daemon advertises itself (1.3.0's transport watchdogs); retry, or `tbmcp doctor --wait 30`. Before 1.3.0 this took 40–60 s — [details](docs/VERIFIED-FINDINGS.md) |
-| Codex reports a startup timeout | raise `startup_timeout_sec`; Codex defaults to 10 s |
-| Claude Code truncates a large result | raise `MAX_MCP_OUTPUT_TOKENS` (default 25,000) |
-| A dependency fails with "DLL load failed" or "cannot open shared object file" | A binary your OS will not load — Windows Application Control blocks unsigned, low-reputation wheels. `bootstrap` detects this and downgrades the offending package automatically; run `python bootstrap.py` and read the `binaries` step. |
-
-`TBMCP_DEBUG=1` turns on verbose logging to stderr. `TBMCP_STATE_DIR` moves the
-daemon's advertisement, lock and log out of the platform default; `doctor` prints
-the log's path. The add-on logs to Thunderbird's error console with a `[tbmcp]`
-prefix, and `tb_console` returns those lines as a tool — including the add-on's own
-`console.*` output, which the error console window does not show.
-
----
+Thunderbird 128 or newer (verified on 155), Python 3.11–3.14, Windows, macOS or Linux
+including Snap and Flatpak Thunderbird.
 
 ## Development
 
 ```bash
 uv venv && uv pip install -e ".[dev]"
-
 pytest                                  # 288 tests, no Thunderbird needed
-node --test "tests/js/*.test.mjs"       # 111 add-on tests under node:vm, no Thunderbird needed
+node --test "tests/js/*.test.mjs"       # 111 add-on tests under node:vm
 ruff check . && ruff format --check .
-python tools/check_consistency.py       # do all three layers still agree?
-python tools/build_xpi.py build         # build the add-on package
-python tools/gen_tool_reference.py      # regenerate the tool docs from the code
-python tools/smoke_live.py              # read-only checks against a live Thunderbird
-python tools/smoke_search.py            # the search tools, paging and errors, against a live Thunderbird
-python tools/smoke_write.py             # gated-write checks; leaves the profile unchanged
+python tools/check_consistency.py       # the three layers still agree
+python tools/smoke_search.py            # live acceptance, against a running Thunderbird
 ```
 
-Three layers have to agree on method names — the Python tools, the add-on handlers,
-and the privileged forwarding list — and nothing notices when they stop agreeing until
-runtime. `check_consistency.py` compares them, validates every JavaScript file, and
-checks the manifest lists exactly the scripts that exist. Run it before you commit.
-
-The add-on's own logic is tested under `node:vm` (`tests/js`): the real background
-and privileged scripts run against fakes of the WebExtension and XPCOM surfaces, so
-the sandbox rules that broke 1.2.0's search — no DOM timers, a separate realm,
-errors that must be `ExtensionError`s — are exercised without a Thunderbird.
-
-| Document | |
-| --- | --- |
-| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | why it is built this way, and what was rejected |
-| [PROTOCOL.md](docs/PROTOCOL.md) | the wire protocol between Python and the add-on |
-| [TOOLS.md](docs/TOOLS.md) | the contract: tool → bridge method → implementation |
-| [TOOL-REFERENCE.md](docs/TOOL-REFERENCE.md) | every tool and parameter, generated from the code |
-| [VERIFIED-FINDINGS.md](docs/VERIFIED-FINDINGS.md) | measurements against a live Thunderbird, and the traps |
-
----
+The add-on's real scripts run under `node:vm` against fakes of the WebExtension and
+XPCOM surfaces (`tests/js`), which is how the sandbox rules that broke 1.2.0's search
+are now caught before a release. Everything documented here was verified against a
+live Thunderbird; the measurements are in
+[docs/VERIFIED-FINDINGS.md](docs/VERIFIED-FINDINGS.md).
 
 ## Author
 
 GitHub [@U-C4N](https://github.com/U-C4N) · X [@UEdizaslan](https://x.com/UEdizaslan)
 
-Built from actually living in Thunderbird all day, then made model-agnostic through
-MCP. Every capability was measured against a real install before it was documented —
-see [VERIFIED-FINDINGS.md](docs/VERIFIED-FINDINGS.md) for what that turned up.
-
-Related work: [Autocad-MCP](https://github.com/U-C4N/Autocad-MCP) ·
+Related: [Autocad-MCP](https://github.com/U-C4N/Autocad-MCP) ·
 [U-Pool](https://github.com/U-C4N/U-Pool) ·
 [Deuz-SDK](https://github.com/Deuz-AI/Deuz-SDK)
 
-## Contributing
-
-Issues and pull requests are welcome. Before opening one:
-
-```bash
-pytest && node --test "tests/js/*.test.mjs" && ruff check . && python tools/check_consistency.py
-```
-
-`check_consistency.py` is the important one — it catches the mismatches between the
-three layers that nothing else notices until runtime. If you add a tool, run
-`python tools/gen_tool_reference.py` so the docs follow the code.
-
-Report a security problem through GitHub rather than a public issue.
+Issues and pull requests are welcome. Report a security problem through GitHub
+rather than a public issue.
 
 ## Licence
 
-MIT — see [LICENSE](LICENSE). The add-on contains no Mozilla-licensed code: the
-reverse-WebSocket design was chosen partly so that no MPL-2.0 HTTP server needed to be
-vendored.
+MIT — see [LICENSE](LICENSE). The add-on contains no Mozilla-licensed code.
