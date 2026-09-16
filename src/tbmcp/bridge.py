@@ -77,10 +77,11 @@ class Bridge:
             "close_fds": True,
         }
         if sys.platform == "win32":
-            DETACHED_PROCESS = 0x00000008
             CREATE_NEW_PROCESS_GROUP = 0x00000200
             CREATE_NO_WINDOW = 0x08000000
-            kwargs["creationflags"] = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
+            # DETACHED_PROCESS makes Windows ignore CREATE_NO_WINDOW. A venv
+            # launcher can then give its Python child a visible console.
+            kwargs["creationflags"] = CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
         else:
             kwargs["start_new_session"] = True
         log.info("starting the tbmcp daemon")
