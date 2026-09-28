@@ -64,12 +64,15 @@ def register(reg: Registrar) -> None:
         max_size: int | None = None,
         limit: int = 25,
         cursor: str | None = None,
+        sort: Literal["newest", "oldest", "none"] = "newest",
     ) -> dict[str, Any]:
         """Search the user's mail. Combine `full_text` with any filters below.
 
         `full_text` uses Thunderbird's global index and searches headers and bodies
         of already-indexed messages; `subject`/`author`/`body` are substring matches
-        evaluated per folder. Dates are ISO-8601. Results are summaries — call
+        evaluated per folder. Dates are ISO-8601. Results come newest first; `sort`
+        "oldest" reverses that, "none" returns folder storage order (faster on huge
+        result sets). Results are summaries — call
         `mail_get` for a body. Continue with `cursor=nextCursor`. A first page
         carries `scope` — the folder and account ids the query covered — so an empty
         result can be read against what was actually searched.
@@ -131,6 +134,7 @@ def register(reg: Registrar) -> None:
                 "query": query,
                 "limit": clamp(limit, default=25, minimum=1, maximum=200, field="limit"),
                 "cursor": cursor,
+                "sort": one_of(sort, ("newest", "oldest", "none"), field="sort", default="newest"),
             },
             timeout=90.0,
         )

@@ -91,11 +91,26 @@ describe("messages.query", () => {
     const messages = fakeMessages({ folders: { [FOLDER]: sample(30) }, queryPageSize: 10 });
     const query = loadHandlers(messages).get("messages.query");
 
-    await query({ query: { subject: "Re" }, limit: 5 });
+    await query({ query: { subject: "Re" }, limit: 5, sort: "none" });
 
     const queryInfo = messages.calls[0].args[0];
     assert.equal(queryInfo.returnMessageListId, undefined);
     assert.equal(queryInfo.messagesPerPage, 5);
+  });
+
+  it("puts the newest match first across folders, and pages in that order", async () => {
+    // The old folder comes first in storage order, as Sent did on a real mailbox.
+    const old = sample(12, "account1://Old").map((m) => ({ ...m, id: m.id + 1000, date: m.date - 1e9 }));
+    const folders = { "account1://Old": old, [FOLDER]: sample(12) };
+    const query = loadHandlers(fakeMessages({ folders, queryPageSize: 5 })).get("messages.query");
+
+    const first = await query({ query: { subject: "Re" }, limit: 5 });
+    const next = await query({ query: { subject: "Re" }, limit: 5, cursor: first.cursor });
+    const oldest = await query({ query: { subject: "Re" }, limit: 1, sort: "oldest" });
+
+    assert.deepEqual(ids(first), [100, 101, 102, 103, 104]);
+    assert.deepEqual(ids(next), [105, 106, 107, 108, 109]);
+    assert.deepEqual(ids(oldest), [1111]);
   });
 
   it("resolves a bare list id, for a build that insists on answering with one", async () => {

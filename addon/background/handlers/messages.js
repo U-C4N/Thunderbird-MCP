@@ -179,6 +179,30 @@
     return typeof first === "string" ? browser.messages.continueList(first) : first;
   }
 
+  const SORTED_PAGE_SIZE = 500;
+
+  /**
+   * Run a query to the end and hand back every match as one page, by date.
+   *
+   * `messages.query` has no sort option: it answers folder by folder, in storage
+   * order, so the newest match can sit on the last page. The only way to put it
+   * first is to collect them all. The page carries no id, so `collectPage` parks
+   * whatever the limit leaves over and pages through that.
+   */
+  async function sortedQuery(query, newestFirst) {
+    // ponytail: holds every match in memory; a search matching tens of thousands
+    // of messages is slow here — pass sort "none" for storage order.
+    let page = await startQuery(Object.assign({}, query, { messagesPerPage: SORTED_PAGE_SIZE }));
+    const all = [...((page && page.messages) || [])];
+    while (page && page.id) {
+      page = await browser.messages.continueList(page.id);
+      all.push(...((page && page.messages) || []));
+    }
+    const time = (message) => (message.date ? new Date(message.date).getTime() : 0);
+    all.sort((a, b) => (newestFirst ? time(b) - time(a) : time(a) - time(b)));
+    return { messages: all };
+  }
+
   /** A folder or account id, or a list of them, as a list — or null for neither. */
   function idList(value) {
     if (!value) {
@@ -212,8 +236,11 @@
     // keeps the common case to one round trip. Thunderbird may still cut a page
     // short (autoPaginationTimeout), so the walk below loops regardless.
     query.messagesPerPage = limit;
+    const sort = params.sort || "newest";
+    const start =
+      sort === "none" ? () => startQuery(query) : () => sortedQuery(query, sort === "newest");
 
-    const paged = await collectPage(params.cursor, () => startQuery(query), limit);
+    const paged = await collectPage(params.cursor, start, limit);
     const result = { messages: paged.messages, cursor: paged.cursor };
     if (!params.cursor) {
       // Only on the first page: a continuation is by definition the same search.
