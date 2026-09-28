@@ -82,7 +82,7 @@ The daemon picks a free port, then writes a connection file into the Thunderbird
 profile directory it discovered from `profiles.ini`:
 
 ```jsonc
-// <profile>/tbmcp-bridge.json   (0600 on POSIX; ACL-restricted on Windows)
+// <profile>/tbmcp-bridge.json   (0600 on POSIX; ACL-restricted on Windows, see FILE-PERMISSIONS.md)
 { "version": 1, "port": 51234, "token": "<32 random bytes, base64url>", "pid": 4242 }
 ```
 

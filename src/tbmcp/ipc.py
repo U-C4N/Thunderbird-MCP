@@ -155,7 +155,9 @@ def _restrict_permissions(path: Path) -> None:
             return
         for args in (
             ["icacls", str(path), "/inheritance:r"],
-            ["icacls", str(path), "/grant:r", f"{user}:(R,W)"],
+            # Full control, not (R,W): os.replace over this file on the next start
+            # needs DELETE, and without it every later daemon start fails.
+            ["icacls", str(path), "/grant:r", f"{user}:F"],
         ):
             try:
                 subprocess.run(
