@@ -76,7 +76,7 @@ Write one attachment to a directory on this machine.
 `part_name` comes from `mail_attachments`. Refuses to clobber an existing
 file unless `overwrite=true`.
 
-Parameters: **message_id**, **part_name**, **directory**, filename, overwrite  
+Parameters: **message_id**, **part_name**, **directory**, filename, overwrite, confirm  
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `mail_mark` · write

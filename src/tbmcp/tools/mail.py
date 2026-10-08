@@ -255,13 +255,19 @@ def register(reg: Registrar) -> None:
         result = await call("messages.listAttachments", {"messageId": message_id})
         return page(result.get("attachments", []), messageId=message_id)
 
-    @reg.write_tool(title="Save an attachment", annotations=MUTATING, interactive=False)
+    # Gated, unlike the other cheap writes: the bytes come from whoever sent the
+    # message and the path is the model's choice, so a mail that talks the model into
+    # a startup folder (~/.config/autostart, Startup) gets its attachment run at the
+    # next login.
+    @reg.write_tool(title="Save an attachment", annotations=MUTATING)
     async def mail_save_attachment(
         message_id: int,
         part_name: str,
         directory: str,
         filename: str | None = None,
         overwrite: bool = False,
+        confirm: bool = False,
+        consent: Gate("write this attachment to a file on this machine") = None,  # type: ignore[valid-type]
     ) -> dict[str, Any]:
         """Write one attachment to a directory on this machine.
 
@@ -269,6 +275,7 @@ def register(reg: Registrar) -> None:
         file unless `overwrite=true`.
         """
         guard_write("save attachments")
+        require(consent, "write this attachment to a file on this machine")
         result = await call(
             "messages.saveAttachment",
             {
