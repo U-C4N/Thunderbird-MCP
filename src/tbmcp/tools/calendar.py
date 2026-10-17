@@ -218,7 +218,7 @@ def register(reg: Registrar) -> None:
         individual meetings that fall inside the window, which is what you want
         for "what is on next week".
         """
-        start, end = _window(from_date, to_date, clamp(days, default=30, minimum=1, maximum=1095))
+        start, end = _window(from_date, to_date, clamp(days, default=30, minimum=1, maximum=1095, field="days"))
         result = await call(
             "x.calendar.listItems",
             {
