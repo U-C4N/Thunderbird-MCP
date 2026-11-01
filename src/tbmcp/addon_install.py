@@ -144,6 +144,10 @@ def find_thunderbird() -> pathlib.Path | None:
     return pathlib.Path(found) if found else None
 
 
+#: Main-process names outside Windows, as a `pgrep -x` pattern.
+PROCESS_NAMES = "thunderbird|thunderbird-bin"
+
+
 def running_pids() -> list[int]:
     """PIDs of running Thunderbird processes, best effort and dependency-free."""
     try:
@@ -161,10 +165,16 @@ def running_pids() -> list[int]:
                 if len(parts) >= 2 and parts[1].isdigit():
                     pids.append(int(parts[1]))
             return pids
+        # By process name, never `pgrep -f`: a command line containing "thunderbird"
+        # also matched this package's own interpreter (…/thunderbird-mcp/venv/bin/
+        # python), so `_stop` sent SIGTERM to install-addon itself and Thunderbird
+        # was left closed. Debian and Ubuntu exec the real binary as thunderbird-bin;
+        # content processes carry names of their own and go with their parent.
         out = subprocess.run(
-            ["pgrep", "-f", "thunderbird"], capture_output=True, text=True, check=False
+            ["pgrep", "-x", PROCESS_NAMES], capture_output=True, text=True, check=False
         ).stdout
-        return [int(line) for line in out.split() if line.isdigit()]
+        own = os.getpid()
+        return [int(line) for line in out.split() if line.isdigit() and int(line) != own]
     except (OSError, ValueError):
         return []
 
