@@ -78,6 +78,7 @@ reproduce the checked-in catalogue. Build the add-on with
 The wheel carries the add-on source; live profiles, mail fixtures and downloaded
 Thunderbird binaries are excluded from all distributions.
 
-The platform/Python CI matrix remains in [ci.yml](../.github/workflows/ci.yml).
-macOS and hosted CI were not run as part of this local validation. This is an
-unreleased source version; local acceptance does not publish a release.
+GitHub Actions runs the same suite on Windows, Ubuntu and macOS with Python
+3.11, 3.13 and 3.14. The [workflow](../.github/workflows/ci.yml) defines the
+nine jobs. The [1.4.0 release notes](https://github.com/U-C4N/Thunderbird-MCP/releases/tag/v1.4.0)
+link to the results for the published revision.

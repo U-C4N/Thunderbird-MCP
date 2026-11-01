@@ -164,8 +164,7 @@ services. Never use a user's production account as test data.
 Before publishing, record results for the supported minimum Thunderbird,
 selected ESR and current release, and the existing platform/Python CI matrix.
 Mixed server/add-on versions must fail new workflows before mutation while
-preserving older supported tools. This source version is not itself a published
-release; unresolved live acceptance failures block publication.
+preserving older supported tools. Resolve live acceptance failures before publication.
 
 See [the validation record](VALIDATION-1.4.md) for the isolated fixtures and
 commands used to reproduce the checks.

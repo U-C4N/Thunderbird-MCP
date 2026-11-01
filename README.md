@@ -1,5 +1,5 @@
 [![CI](https://github.com/U-C4N/Thunderbird-MCP/actions/workflows/ci.yml/badge.svg)](https://github.com/U-C4N/Thunderbird-MCP/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-1.4.0%20unreleased-0A84FF)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.4.0-0A84FF)](https://github.com/U-C4N/Thunderbird-MCP/releases/tag/v1.4.0)
 [![Thunderbird](https://img.shields.io/badge/Thunderbird-128%2B-0A84FF)](https://www.thunderbird.net/)
 [![Python](https://img.shields.io/badge/python-3.11%20%E2%80%93%203.14-blue)](https://www.python.org/)
 [![Tools](https://img.shields.io/badge/tools-124-brightgreen)](docs/TOOL-REFERENCE.md)
@@ -34,8 +34,7 @@ Thunderbird 128 remains the minimum. Reading a saved draft works on 128.0;
 editing or sending it requires **128.4.3 or newer on the 128 ESR branch**, or
 **133.0b3 or newer** on the main release line.
 
-This is the unreleased 1.4.0 development version. See the
-[workflow guide](docs/WORKFLOWS-1.4.md), [validation results](docs/VALIDATION-1.4.md)
+See the [workflow guide](docs/WORKFLOWS-1.4.md), [validation results](docs/VALIDATION-1.4.md)
 and [changelog](CHANGELOG.md).
 
 ## Quick start
