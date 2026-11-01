@@ -197,6 +197,34 @@ def _result(raw: dict[str, Any], mode: str, **extra: Any) -> dict[str, Any]:
     return payload
 
 
+def _request_key(value: str | None, *, required: bool = False) -> str | None:
+    if value is None and not required:
+        return None
+    if not isinstance(value, str) or not value.strip() or len(value) > 200:
+        raise UsageError("request_key must be a non-empty string of at most 200 characters.")
+    return value
+
+
+async def _deliver(kind: str, params: dict[str, Any], mode: str, request_key: str | None):
+    if mode in ("send", "later") or request_key is not None:
+        return await call(
+            "daemon.operations.submit",
+            {"kind": kind, "requestKey": _request_key(request_key), "params": params},
+            timeout=240.0,
+        )
+    return await call(f"compose.{kind}", params, timeout=240.0)
+
+
+def _delivery_result(raw: dict[str, Any], mode: str, **extra: Any) -> dict[str, Any]:
+    if mode in ("send", "later") or "operationId" in raw or "status" in raw:
+        # The operation may still be running, or its outcome may be unknown.
+        # Never infer successful sending from the requested mode.
+        if mode == "draft" and raw.get("status") == "succeeded":
+            return {**_result(raw, mode, **extra), **raw, "mode": mode}
+        return {**extra, **raw, "mode": mode}
+    return _result(raw, mode, **extra)
+
+
 def register(reg: Registrar) -> None:
     # ------------------------------------------------------------------- sending
 
@@ -211,6 +239,7 @@ def register(reg: Registrar) -> None:
         attachments: list[str] | None = None,
         identity_id: str | None = None,
         mode: Literal["draft", "send", "later"] | None = None,
+        request_key: str | None = None,
         reply_to_message_id: int | None = None,
         priority: Priority | None = None,
         return_receipt: bool = False,
@@ -252,8 +281,8 @@ def register(reg: Registrar) -> None:
         if dry_run_only:
             return dry_run("compose.send", params)
         require(consent, "send this message")
-        result = await call("compose.send", params, timeout=240.0)
-        return _result(result, effective, recipients=params.get("to"), subject=subject)
+        result = await _deliver("send", params, effective, request_key)
+        return _delivery_result(result, effective, recipients=params.get("to"), subject=subject)
 
     @reg.write_tool(title="Reply to a message", annotations=OUTBOUND)
     async def mail_reply(
@@ -269,6 +298,7 @@ def register(reg: Registrar) -> None:
         attachments: list[str] | None = None,
         identity_id: str | None = None,
         mode: Literal["draft", "send", "later"] | None = None,
+        request_key: str | None = None,
         confirm: bool = False,
         consent: Gate("send this reply from the user's account") = None,  # type: ignore[valid-type]
     ) -> dict[str, Any]:
@@ -301,8 +331,10 @@ def register(reg: Registrar) -> None:
             }
         )
         require(consent, "send this reply")
-        result = await call("compose.reply", params, timeout=240.0)
-        return _result(result, effective, repliedTo=message_id, replyType=params["replyType"])
+        result = await _deliver("reply", params, effective, request_key)
+        return _delivery_result(
+            result, effective, repliedTo=message_id, replyType=params["replyType"]
+        )
 
     @reg.write_tool(title="Forward a message", annotations=OUTBOUND)
     async def mail_forward(
@@ -317,6 +349,7 @@ def register(reg: Registrar) -> None:
         attachments: list[str] | None = None,
         identity_id: str | None = None,
         mode: Literal["draft", "send", "later"] | None = None,
+        request_key: str | None = None,
         confirm: bool = False,
         consent: Gate("forward this message to someone else") = None,  # type: ignore[valid-type]
     ) -> dict[str, Any]:
@@ -347,8 +380,8 @@ def register(reg: Registrar) -> None:
             }
         )
         require(consent, "forward this message")
-        result = await call("compose.forward", params, timeout=240.0)
-        return _result(result, effective, forwarded=message_id, forwardAs=forward_as)
+        result = await _deliver("forward", params, effective, request_key)
+        return _delivery_result(result, effective, forwarded=message_id, forwardAs=forward_as)
 
     # -------------------------------------------------------- drafts and windows
 
@@ -384,7 +417,171 @@ def register(reg: Registrar) -> None:
         )
         params["mode"] = one_of(kind, ("draft", "template"), field="kind", default="draft")
         result = await call("compose.save", params, timeout=120.0)
-        return _result(result, params["mode"])
+        payload = _result(result, params["mode"])
+        if kind == "draft" and result.get("messageId") is not None:
+            try:
+                snapshot = await call(
+                    "daemon.drafts.get", {"messageId": result["messageId"]}, timeout=120.0
+                )
+                for key in ("draftRef", "revision", "editable", "sendable"):
+                    if key in snapshot:
+                        payload[key] = snapshot[key]
+            except Exception:
+                # Saving already succeeded. Failure to register the optional handle
+                # must not invite a retry that creates another draft.
+                payload["draftHandleAvailable"] = False
+        return payload
+
+    @reg.read_tool(title="Read a saved draft")
+    async def mail_draft_get(
+        message_id: int | None = None,
+        draft_ref: str | None = None,
+    ) -> dict[str, Any]:
+        """Read a saved draft and its revision without opening a composer.
+
+        Pass exactly one reference. Protected or oversized drafts return metadata
+        with editable=false; a preview must never be used as a replacement body.
+        Unsaved changes in an open Thunderbird window are not this saved snapshot.
+        """
+        if (message_id is None) == (draft_ref is None):
+            raise UsageError("Pass exactly one of message_id or draft_ref.")
+        if message_id is not None and message_id < 0:
+            raise UsageError("message_id must be a non-negative integer.")
+        if draft_ref is not None and not draft_ref.strip():
+            raise UsageError("draft_ref cannot be empty.")
+        params = {"messageId": message_id} if message_id is not None else {"draftRef": draft_ref}
+        return await call("daemon.drafts.get", params, timeout=120.0)
+
+    @reg.write_tool(title="Update a saved draft", annotations=MUTATING, interactive=False)
+    async def mail_draft_update(
+        draft_ref: str,
+        expected_revision: str,
+        request_key: str,
+        changes: dict[str, Any] | None = None,
+        subject: str | None = None,
+        body: str | None = None,
+        to: list[str] | None = None,
+        cc: list[str] | None = None,
+        bcc: list[str] | None = None,
+        add_attachments: list[str] | None = None,
+        remove_attachment_refs: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Update the saved draft only if its reviewed revision is still current.
+
+        Omitted fields stay unchanged; an empty recipient list clears that field.
+        Body replaces the complete body, including any signature, in its existing
+        format. Sender identity cannot change. If the user's composer is open,
+        return DRAFT_BUSY and leave the window for the user to save or close.
+        Reuse request_key to retrieve an operation without applying it twice.
+        `changes` accepts subject, body, to, cc, bcc, add_attachments and
+        remove_attachment_refs. Separate fields are aliases; use one form only.
+        """
+        guard_write("update drafts")
+        if not draft_ref.strip() or not expected_revision.strip():
+            raise UsageError("draft_ref and expected_revision are required; call mail_draft_get.")
+        if changes is not None:
+            if any(
+                value is not None
+                for value in (subject, body, to, cc, bcc, add_attachments, remove_attachment_refs)
+            ):
+                raise UsageError("Use changes or the separate change fields, not both.")
+            aliases = {
+                "addAttachments": "add_attachments",
+                "removeAttachmentRefs": "remove_attachment_refs",
+            }
+            normalised = {}
+            for key, value in changes.items():
+                key = aliases.get(key, key)
+                if (
+                    key
+                    not in {
+                        "subject",
+                        "body",
+                        "to",
+                        "cc",
+                        "bcc",
+                        "add_attachments",
+                        "remove_attachment_refs",
+                    }
+                    or key in normalised
+                ):
+                    raise UsageError("changes contains an unsupported or duplicate field.")
+                if key in {"subject", "body"}:
+                    if not isinstance(value, str):
+                        raise UsageError(f"changes.{key} must be a string.")
+                elif not isinstance(value, list) or any(
+                    not isinstance(item, str) for item in value
+                ):
+                    raise UsageError(f"changes.{key} must be a list of strings.")
+                normalised[key] = value
+            subject, body = normalised.get("subject"), normalised.get("body")
+            to, cc, bcc = (normalised.get(key) for key in ("to", "cc", "bcc"))
+            add_attachments = normalised.get("add_attachments")
+            remove_attachment_refs = normalised.get("remove_attachment_refs")
+        changes = {}
+        for name, value in (("subject", subject), ("body", body)):
+            if value is not None:
+                changes[name] = value
+        if body is not None and len(body) > 200_000:
+            raise UsageError("body exceeds 200000 characters; edit this draft in Thunderbird.")
+        for name, values in (("to", to), ("cc", cc), ("bcc", bcc)):
+            if values is not None:
+                changes[name] = _addresses(values, field=name) or []
+        if add_attachments:
+            changes["addAttachments"] = _attachments(add_attachments)
+        if remove_attachment_refs:
+            if any(not value.strip() for value in remove_attachment_refs):
+                raise UsageError("remove_attachment_refs must contain non-empty references.")
+            changes["removeAttachmentRefs"] = list(dict.fromkeys(remove_attachment_refs))
+        if not changes:
+            raise UsageError("Nothing to change; supply a draft field or attachment change.")
+        return await call(
+            "daemon.operations.submit",
+            {
+                "kind": "draft_update",
+                "requestKey": _request_key(request_key, required=True),
+                "params": {
+                    "draftRef": draft_ref,
+                    "expectedRevision": expected_revision,
+                    "changes": changes,
+                },
+            },
+            timeout=180.0,
+        )
+
+    @reg.write_tool(title="Send the reviewed saved draft", annotations=OUTBOUND)
+    async def mail_draft_send(
+        draft_ref: str,
+        expected_revision: str,
+        request_key: str,
+        mode: Literal["send", "later"] = "send",
+        confirm: bool = False,
+        consent: Gate("send this saved draft from the user's account") = None,  # type: ignore[valid-type]
+    ) -> dict[str, Any]:
+        """Send exactly the saved draft revision the user reviewed, or queue it.
+
+        A changed or open draft is refused. Reuse request_key after interruption;
+        unknown means sending may have occurred and must not be retried with a new
+        key. mode=later queues in Outbox, not at a scheduled date.
+        """
+        guard_write("send drafts")
+        if not draft_ref.strip() or not expected_revision.strip():
+            raise UsageError("draft_ref and expected_revision are required; call mail_draft_get.")
+        key = _request_key(request_key, required=True)
+        require(consent, "send this saved draft")
+        return await call(
+            "daemon.operations.submit",
+            {
+                "kind": "draft_send",
+                "requestKey": key,
+                "params": {
+                    "draftRef": draft_ref,
+                    "expectedRevision": expected_revision,
+                    "mode": mode,
+                },
+            },
+            timeout=240.0,
+        )
 
     @reg.write_tool(title="Open a compose window", annotations=MUTATING, interactive=False)
     async def mail_compose_open(

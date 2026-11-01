@@ -1,8 +1,8 @@
 [![CI](https://github.com/U-C4N/Thunderbird-MCP/actions/workflows/ci.yml/badge.svg)](https://github.com/U-C4N/Thunderbird-MCP/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/badge/release-v1.3.0-0A84FF)](https://github.com/U-C4N/Thunderbird-MCP/releases/tag/v1.3.0)
-[![Thunderbird](https://img.shields.io/badge/Thunderbird-128%20%E2%80%93%20155-0A84FF)](https://www.thunderbird.net/)
+[![Version](https://img.shields.io/badge/version-1.4.0-0A84FF)](https://github.com/U-C4N/Thunderbird-MCP/releases/tag/v1.4.0)
+[![Thunderbird](https://img.shields.io/badge/Thunderbird-128%2B-0A84FF)](https://www.thunderbird.net/)
 [![Python](https://img.shields.io/badge/python-3.11%20%E2%80%93%203.14-blue)](https://www.python.org/)
-[![Tools](https://img.shields.io/badge/tools-112-brightgreen)](docs/TOOL-REFERENCE.md)
+[![Tools](https://img.shields.io/badge/tools-124-brightgreen)](docs/TOOL-REFERENCE.md)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 # Thunderbird MCP
@@ -14,24 +14,28 @@ same Thunderbird you have open.
 
 Built for **Claude Code** and **Codex CLI**, and able to serve both at once.
 
-## What is new in 1.3.0
+## What is new in 1.4.0
 
-- **Search works.** Every search tool in 1.2.0 was broken by six separate defects
-  (reported in [#3](https://github.com/U-C4N/Thunderbird-MCP/issues/3)). `mail_search`,
-  `search_global` and `search_conversation` now return results, dates, scores and
-  participants, and folder scoping actually scopes.
-- **Paging keeps every message.** A cursor no longer skips the rest of the page it
-  stopped in.
-- **Errors mean something.** No more "An unexpected error occurred": a failure says
-  what to change, on every `mcp` SDK version, and a large answer no longer drops the
-  connection.
-- **The bridge explains itself.** `tb_status` and `tbmcp doctor` report both sides of
-  the connection, name the remedy, warn when the installed add-on is older than the
-  package, and point at the daemon's log.
-- **Tests that see the add-on.** 111 node tests run the real add-on scripts; 288
-  Python tests; CI on Windows, macOS and Linux with Python 3.11–3.14.
+- **Continue a saved draft.** Read its current revision, edit the actual draft and
+  send the reviewed version. User-owned compose windows remain untouched.
+- **Preview, apply and undo a batch.** Freeze a selection before changing flags,
+  tags or moving mail within an account. Later user edits become conflicts.
+- **Know what a search covered.** Stable conversation/search pages carry coverage
+  and truncation information; an unavailable index does not silently change the query.
+- **Find possible follow-ups.** Inspect outgoing conversations with no observed
+  human reply, with header evidence and explicit limits.
+- **Save selected attachments together.** Preview filenames and sizes, then
+  export without overwriting existing files.
+- **Inspect uncertain work.** Seven-day local operation history and runtime
+  receipts replace blind retries after a lost reply. Event pages no longer skip
+  buffered notifications.
 
-Details in [CHANGELOG.md](CHANGELOG.md).
+Thunderbird 128 remains the minimum. Reading a saved draft works on 128.0;
+editing or sending it requires **128.4.3 or newer on the 128 ESR branch**, or
+**133.0b3 or newer** on the main release line.
+
+See the [workflow guide](docs/WORKFLOWS-1.4.md), [validation results](docs/VALIDATION-1.4.md)
+and [changelog](CHANGELOG.md).
 
 ## Quick start
 
@@ -58,8 +62,10 @@ Zed. Use `python -m tbmcp serve` as the command, with an absolute interpreter pa
 | | |
 | --- | --- |
 | **Find** | ranked full-text search across every account, threads rebuilt across Inbox, Sent and archives, substring filters by folder, sender, date, tag |
-| **Triage** | mark, tag, move, archive, file in bulk — with the source folder reported so a wrong move is reversible |
-| **Write** | `mail_send` produces a reviewable draft by default; sending is a separate, confirmed step |
+| **Triage** | preview and undo marks/tags and same-account moves; archive/copy/delete remain separate tools |
+| **Write** | create a draft, continue editing the saved version, then send with a revision check and confirmation |
+| **Follow up** | find possible unanswered outgoing conversations with evidence and coverage limits |
+| **Collect files** | freeze attachment selections and export with non-overwriting writes and per-file outcomes |
 | **Configure** | server ports and security, identities and signatures, SMTP servers, junk handling, ~5,700 preferences — every write reports the old value so it can be undone |
 | **Automate** | create, reorder and run message filters; events and tasks on the calendar |
 | **Diagnose** | `tb_status`, `tb_diagnostics`, `tb_console` and `tbmcp doctor` say what is wrong and what to do |
@@ -85,11 +91,11 @@ tbmcp tools --toolsets all              # list what would be registered
 ```
 
 <!-- BEGIN GENERATED TOOL CATALOGUE -->
-112 tools across 10 toolsets; 48 of them read-only.
+124 tools across 10 toolsets; 54 of them read-only.
 Full signatures in [docs/TOOL-REFERENCE.md](docs/TOOL-REFERENCE.md).
 
 <details>
-<summary><b><code>mail</code></b> — 15 tools · on by default — Search, read, triage and file messages, plus attachments and tags.</summary>
+<summary><b><code>mail</code></b> — 21 tools · on by default — Search, read, triage and file messages, plus attachments and tags.</summary>
 
 | Tool | | What it does |
 | --- | --- | --- |
@@ -108,6 +114,12 @@ Full signatures in [docs/TOOL-REFERENCE.md](docs/TOOL-REFERENCE.md).
 | `mail_tags` | read | List the tags defined in Thunderbird, with keys, labels and colours |
 | `mail_tag_upsert` | write | Create a tag, or recolour/rename an existing one |
 | `mail_tag_delete` | **destructive** | Remove a tag definition. Messages keep the raw keyword but lose the label |
+| `mail_batch_preview` | read | Preview changes to up to 500 messages without changing mail |
+| `mail_batch_apply` | write | Apply a preview once and return its operation id for tb_operation_status |
+| `mail_batch_undo` | write | Undo confirmed batch changes whose touched fields have not changed again |
+| `mail_followups` | read | Find possible follow-ups using outgoing mail and indexed reply headers |
+| `mail_attachments_plan` | read | Preview attachment downloads from up to 100 selected messages |
+| `mail_attachments_save` | write | Save a frozen attachment plan once, without overwriting existing files |
 
 </details>
 
@@ -135,7 +147,7 @@ Full signatures in [docs/TOOL-REFERENCE.md](docs/TOOL-REFERENCE.md).
 </details>
 
 <details>
-<summary><b><code>compose</code></b> — 6 tools · on by default — Sending, replying, forwarding, drafts and templates.</summary>
+<summary><b><code>compose</code></b> — 9 tools · on by default — Sending, replying, forwarding, drafts and templates.</summary>
 
 | Tool | | What it does |
 | --- | --- | --- |
@@ -143,6 +155,9 @@ Full signatures in [docs/TOOL-REFERENCE.md](docs/TOOL-REFERENCE.md).
 | `mail_reply` | **destructive** | Reply to a message. Saves a reviewable draft unless `mode="send"` |
 | `mail_forward` | **destructive** | Forward a message. Saves a reviewable draft unless `mode="send"` |
 | `mail_draft_save` | write | Save a message without sending it, as a draft or a template |
+| `mail_draft_get` | read | Read a saved draft and its revision without opening a composer |
+| `mail_draft_update` | write | Update the saved draft only if its reviewed revision is still current |
+| `mail_draft_send` | **destructive** | Send exactly the saved draft revision the user reviewed, or queue it |
 | `mail_compose_open` | write | Open a populated compose window for the user to finish by hand |
 | `mail_send_status` | read | List messages sitting in the Outbox, unsent |
 
@@ -153,8 +168,8 @@ Full signatures in [docs/TOOL-REFERENCE.md](docs/TOOL-REFERENCE.md).
 
 | Tool | | What it does |
 | --- | --- | --- |
-| `search_global` | read | Ranked full-corpus search across every indexed folder and account |
-| `search_conversation` | read | Every message in one thread, oldest first, across folders and accounts |
+| `search_global` | read | Ranked search of indexed mail, with stable snapshot pagination |
+| `search_conversation` | read | Read a conversation oldest first, across indexed folders and accounts |
 | `search_index_status` | read | Whether Thunderbird's global index is enabled, and how far along it is |
 | `search_saved_list` | read | List the saved searches (virtual folders) and what each one matches |
 | `search_saved_create` | write | Create a saved search that appears in the folder pane |
@@ -266,10 +281,13 @@ Full signatures in [docs/TOOL-REFERENCE.md](docs/TOOL-REFERENCE.md).
 </details>
 
 <details>
-<summary><b><code>admin</code></b> — 7 tools · on by default — Connection status, events, diagnostics and the error console.</summary>
+<summary><b><code>admin</code></b> — 10 tools · on by default — Connection status, events, diagnostics and the error console.</summary>
 
 | Tool | | What it does |
 | --- | --- | --- |
+| `tb_operation_status` | read | Inspect a queued, completed or uncertain operation without repeating it |
+| `tb_operation_list` | read | List this profile's local, body-free operation history for the last seven days |
+| `tb_operation_cancel` | write | Stop steps not yet started. A send already dispatched cannot be recalled |
 | `tb_status` | read | Whether Thunderbird is attached, and which halves of the add-on loaded |
 | `tb_wait` | read | Block until Thunderbird attaches to the bridge, then report status |
 | `tb_events` | read | Read buffered Thunderbird notifications: new mail, folder and account changes |
@@ -328,8 +346,8 @@ including Snap and Flatpak Thunderbird.
 
 ```bash
 uv venv && uv pip install -e ".[dev]"
-pytest                                  # 288 tests, no Thunderbird needed
-node --test "tests/js/*.test.mjs"       # 111 add-on tests under node:vm
+pytest                                  # no Thunderbird needed
+node --test "tests/js/*.test.mjs"       # real add-on scripts under node:vm
 ruff check . && ruff format --check .
 python tools/check_consistency.py       # the three layers still agree
 python tools/smoke_search.py            # live acceptance, against a running Thunderbird
@@ -337,8 +355,9 @@ python tools/smoke_search.py            # live acceptance, against a running Thu
 
 The add-on's real scripts run under `node:vm` against fakes of the WebExtension and
 XPCOM surfaces (`tests/js`), which is how the sandbox rules that broke 1.2.0's search
-are now caught before a release. Everything documented here was verified against a
-live Thunderbird; the measurements are in
+are caught before a release. Live workflow tests additionally use a separate profile
+and local-only mail services; see the release gate in the workflow guide. Historical
+measurements are in
 [docs/VERIFIED-FINDINGS.md](docs/VERIFIED-FINDINGS.md).
 
 ## Author

@@ -347,7 +347,7 @@ TBX_MODULE_NAMES.push("gloda");
     const query = String(H.need(params, "query"));
     const limit = Math.min(
       Math.max(Number.isInteger(params.limit) ? params.limit : 25, 1),
-      MAX_HITS
+      params.snapshot ? MAX_RETRIEVE : MAX_HITS
     );
     const offset = Number.isInteger(params.offset) && params.offset > 0 ? params.offset : 0;
     const inFolder = params.folderId ? folderMatcher(params.folderId) : null;
@@ -355,7 +355,7 @@ TBX_MODULE_NAMES.push("gloda");
 
     const searcher = new Searcher(null, query, params.matchAll !== false);
     const { usable, unmatchable } = classifyTerms(searcher.fulltextTerms);
-    if (!usable.length) {
+    if (!usable.length && !params.snapshot) {
       throw H.usage(
         `no searchable term in ${JSON.stringify(query)} — the global index needs ` +
           "terms of at least three characters (one for CJK)"
@@ -364,11 +364,11 @@ TBX_MODULE_NAMES.push("gloda");
 
     /* Gloda has no OFFSET, and a folder filter can only be applied after the
      * fact because the searcher's SQL is fixed. Over-fetch, then slice. */
-    const retrieve = Math.min(
+    const retrieve = params.snapshot ? MAX_RETRIEVE : Math.min(
       Math.max((offset + limit) * (inFolder ? 10 : 3), 50),
       MAX_RETRIEVE
     );
-    const messages = await collect(
+    const messages = !usable.length || (params.snapshot && !indexEnabled()) ? [] : await collect(
       (listener) => {
         // What getCollection() does, minus its pref-driven retrieval limit: the
         // searcher stays the collection listener so its scoring still runs, and
@@ -489,7 +489,7 @@ TBX_MODULE_NAMES.push("gloda");
   TBX_MODULES["gloda.conversation"] = async (params) => {
     const limit = Math.min(
       Math.max(Number.isInteger(params.limit) ? params.limit : 100, 1),
-      500
+      params.snapshot ? MAX_RETRIEVE : 500
     );
     const seed = await seedMessage(params);
     const conversation = seed.conversation;

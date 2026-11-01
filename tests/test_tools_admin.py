@@ -73,6 +73,21 @@ async def test_tb_status_explains_a_failing_handshake_rather_than_blaming_the_us
     assert "Ask the user to start Thunderbird" not in payload["hint"]
 
 
+async def test_tb_status_distinguishes_unverified_and_missing_features(fake_bridge) -> None:
+    status = _daemon_status(QUIET_HANDSHAKE) | {
+        "connected": True,
+        "thunderbird": {
+            "capabilities": {"features": {"draftEditNative": None, "operationsV1": True}}
+        },
+    }
+    async with Client(_server(fake_bridge({"daemon.status": status}))) as client:
+        payload = (await client.call_tool("tb_status", {})).structured_content
+    assert payload["unverifiedFeatures"] == ["draftEditNative"]
+    assert "draftEditNative" not in payload["missingFeatures"]
+    assert "operationsV1" not in payload["missingFeatures"]
+    assert "batchUndoV1" in payload["missingFeatures"]
+
+
 async def test_tb_status_keeps_the_usual_hint_when_nothing_has_dialled_in(fake_bridge) -> None:
     """No attempts is the ordinary "Thunderbird is closed" case, and the ordinary
     advice is the right advice for it."""

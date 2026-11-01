@@ -36,6 +36,9 @@ Notes that will save you a round trip:
   index) plus structured filters, and paginates; prefer it over listing folders.
 - IDs are opaque and only valid while Thunderbird stays open. Re-query rather than
   reusing an ID from an earlier session.
+- Use mail_draft_get/update/send to continue a saved draft, and mail_batch_preview
+  before a reversible batch. Inspect tb_operation_status after an uncertain write;
+  never blindly repeat a send, move or attachment export.
 - `mail_send` creates a reviewable draft by default. Pass `mode="send"` to actually
   send, and expect a confirmation prompt.
 - Anything that deletes, sends, or changes settings needs `confirm=true` (or an
@@ -184,6 +187,14 @@ def build_server(settings: Settings, *, bridge: Bridge | None = None) -> MCPServ
             continue
         register(registrar)
 
+    if "mail" in settings.toolsets:
+        for extra in ("batch", "followups", "attachments"):
+            importlib.import_module(f".tools.{extra}", package=__package__).register(registrar)
+    if "admin" not in settings.toolsets and {"mail", "compose"}.intersection(settings.toolsets):
+        from .tools.admin import register_operations
+
+        register_operations(registrar)
+
     log.info(
         "registered %d tools from %s%s",
         len(registrar.registered),
@@ -199,4 +210,4 @@ def _version() -> str:
 
         return version("thunderbird-mcp")
     except Exception:
-        return "1.3.0"
+        return "1.4.0"

@@ -21,6 +21,7 @@ describe("H.withTimeout", () => {
 
     await assert.rejects(H.withTimeout(new Promise(() => {}), 20, "gloda search"), (ex) => {
       assert.match(String(ex.message), /gloda search timed out after 20ms/);
+      assert.equal(ex.code, "NATIVE_TIMEOUT");
       return true;
     });
   });
@@ -37,8 +38,8 @@ describe("H.withTimeout", () => {
 });
 
 /** The whole privileged API, plus the lexical helpers a test needs to drive it. */
-function experiment(globals = fakeSandbox(), extension = {}) {
-  const ctx = loadExperiment(globals);
+function experiment(globals = fakeSandbox(), extension = {}, modules = []) {
+  const ctx = loadExperiment(globals, { modules });
   const api = new ctx.tbx().getAPI({ extension }).tbx;
   return {
     api,
@@ -138,8 +139,9 @@ describe("invoke", () => {
 describe("the rest of the API surface", () => {
   it("packs a blocked write into the envelope, though it never goes through invoke", async () => {
     const globals = fakeSandbox();
-    globals.IOUtils = { ...globals.IOUtils, exists: async () => true };
-    const { api } = experiment(globals);
+    globals.IOUtils = { ...globals.IOUtils, exists: async () => true, stat: async () => ({ type: "directory" }) };
+    globals.PathUtils.isAbsolute = () => true;
+    const { api } = experiment(globals, {}, ["files"]);
 
     const failure = await rejection(
       api.writeFile({ directory: "/out", filename: "invoice.pdf", base64: "", overwrite: false })

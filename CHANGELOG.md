@@ -1,5 +1,63 @@
 # Changelog
 
+## 1.4.0 — 2026-11-01
+
+### Added
+
+- Saved-draft read/update/send with revision checks, native draft editing and
+  persistent references. Open user editors are left alone. Unsupported protected
+  drafts, large bodies and unsafe inline-image edits are refused before changes.
+- Frozen batch previews for read/flag/tag changes and same-account moves, with
+  per-message outcomes, cancellation and conflict-aware undo.
+- A profile-scoped, seven-day SQLite operation journal shared by drafts, batches
+  and attachment exports. Mail bodies and attachment bytes are never stored in it.
+  `tb_operation_status`, `tb_operation_list` and `tb_operation_cancel` remain
+  available to standalone mail/compose clients.
+- Stable bounded search/conversation cursors, coverage metadata and explicit
+  alternative-search suggestions when the global index cannot match a query.
+- `mail_followups`: bounded, evidence-based follow-up candidates, excluding known
+  automatic replies, mailing lists and unsent messages; incomplete coverage is
+  reported rather than treated as proof that no reply exists.
+- Attachment export plans with frozen names, limits, checksums, atomic
+  non-overwriting saves and reconciliation of uncertain writes.
+
+### Fixed
+
+- Event pagination now continues after the last delivered event. `newestSeq`
+  carries the buffer head; `latestSeq` no longer skips unreturned records.
+- Move/delete/new-mail event listeners consume the actual paginated MessageList
+  API shape. Session changes and gaps are explicit and independent clients do not
+  consume each other's notifications.
+- The bridge no longer blindly retries writes or consuming list cursors after a
+  lost reply. Operation keys and runtime receipts prevent duplicate dispatch;
+  uncertain writes are reported as such and native work is not assumed cancelled.
+- Attachment writers share a unique-temp-file implementation with atomic
+  no-overwrite finalisation, replacing a racy exists-then-write check.
+- Installer system access is scoped to the temporary Thunderbird child using the
+  environment opt-in required by newer builds and removed for the normal restart.
+- Daemon replacement respects active writes and uses the same startup lock even
+  with `--force`. Journal worker failures remain visible and block new writes.
+- MIME reads omit optional decoding flags introduced after Thunderbird 128,
+  preserving the existing minimum version while keeping decryption disabled.
+- Native draft matching canonicalises URI host spelling while preserving folder
+  path case. Message deletion retains the boolean API supported from Thunderbird 128.
+
+### Compatibility and limits
+
+- Protocol 1 is retained. New workflows require advertised add-on capabilities;
+  unsupported combinations fail before mutation. Existing tool names remain.
+- Thunderbird 128 remains supported. On builds affected by
+  [Mozilla bug 1925747](https://bugzilla.mozilla.org/show_bug.cgi?id=1925747),
+  saved drafts can be read, but updating or sending them is refused before a
+  compose window opens. The fix shipped in 128.4.3 ESR and 133.0b3.
+- Batch undo covers marks and same-account moves, not sends, permanent deletion,
+  archive layout or cross-account moves. Later user edits are conflicts, not data
+  to overwrite.
+- Seven-day retention also bounds duplicate detection. There is no lifetime
+  exactly-once delivery guarantee and SMTP acceptance is not proof of receipt.
+- See the [workflow guide](docs/WORKFLOWS-1.4.md) and
+  [validation results](docs/VALIDATION-1.4.md) for the tested versions and limits.
+
 ## 1.3.0 — 2026-09-08
 
 Every search tool in 1.2.0 was broken, and the bridge could fail in a way nothing

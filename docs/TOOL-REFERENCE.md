@@ -1,13 +1,14 @@
 # Tool reference
 
-All 112 tools, generated from the code by `tools/gen_tool_reference.py`.
+All 124 tools, generated from the code by `tools/gen_tool_reference.py`.
 Do not edit by hand.
 
-`read` tools cannot change anything and are the only ones registered under
+`read` tools do not modify mail or export files and are the only ones registered under
 `--read-only`. `write` and `destructive` tools require confirmation — an explicit
 `confirm=true`, or an approval prompt where the client supports one.
+Previews may retain local plan metadata; read cursors may retain temporary result snapshots.
 
-## `mail` — 15 tools *(in the default toolset)*
+## `mail` — 21 tools *(in the default toolset)*
 
 Search, read, triage and file messages, plus attachments and tags.
 
@@ -19,10 +20,11 @@ Search the user's mail. Combine `full_text` with any filters below.
 of already-indexed messages; `subject`/`author`/`body` are substring matches
 evaluated per folder. Dates are ISO-8601. Results are summaries — call
 `mail_get` for a body. Continue with `cursor=nextCursor`. A first page
-carries `scope` — the folder and account ids the query covered — so an empty
-result can be read against what was actually searched.
+carries requestedScope and coverage. Requested folders are not proof that
+every message body is available or indexed.
 
-Parameters: full_text, subject, author, recipients, body, folder_id, account_id, include_subfolders, unread, flagged, junk, has_attachment, tags, tag_mode, from_date, to_date, to_me, from_me, min_size, max_size, limit, cursor  
+Parameters: full_text, subject, author, recipients, body, folder_id, account_id, include_subfolders, unread, flagged, junk, has_attachment, tags, tag_mode, from_date, to_date, to_me, from_me, min_size, max_size, limit, cursor
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `mail_list` · read
@@ -32,7 +34,8 @@ List messages in one folder, newest first by default.
 Use `folder_list` to discover folder ids. For anything selective, prefer
 `mail_search`.
 
-Parameters: **folder_id**, limit, cursor, sort_by, descending  
+Parameters: **folder_id**, limit, cursor, sort_by, descending
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `mail_get` · read
@@ -42,14 +45,16 @@ Read one message. `text` gives headers plus the plain-text body.
 `summary` skips the body entirely; `full` adds the MIME part tree and every
 header. Encrypted mail is decrypted when Thunderbird can.
 
-Parameters: **message_id**, detail, decrypt  
+Parameters: **message_id**, detail, decrypt
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `mail_get_many` · read
 
 Read up to 50 messages in one round trip — for triaging a search result.
 
-Parameters: **message_ids**, detail  
+Parameters: **message_ids**, detail
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `mail_get_source` · read
@@ -59,14 +64,16 @@ Fetch a message's raw RFC 5322 source, for header forensics.
 On IMAP this needs the message to be available offline; the tool says so
 rather than returning a partial.
 
-Parameters: **message_id**, decrypt  
+Parameters: **message_id**, decrypt
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `mail_attachments` · read
 
 List a message's attachments with part names, sizes and content types.
 
-Parameters: **message_id**  
+Parameters: **message_id**
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `mail_save_attachment` · write
@@ -76,7 +83,8 @@ Write one attachment to a directory on this machine.
 `part_name` comes from `mail_attachments`. Refuses to clobber an existing
 file unless `overwrite=true`.
 
-Parameters: **message_id**, **part_name**, **directory**, filename, overwrite  
+Parameters: **message_id**, **part_name**, **directory**, filename, overwrite
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `mail_mark` · write
@@ -86,7 +94,8 @@ Set read/flagged/junk state or adjust tags on one or more messages.
 Cheap and reversible, so no confirmation is required. Tag keys come from
 `mail_tags`.
 
-Parameters: **message_ids**, read, flagged, junk, add_tags, remove_tags  
+Parameters: **message_ids**, read, flagged, junk, add_tags, remove_tags
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `mail_move` · write
@@ -96,21 +105,24 @@ Move messages into another folder.
 On IMAP the move is asynchronous — the tool waits for Thunderbird to confirm
 before returning, so a following search reflects the change.
 
-Parameters: **message_ids**, **destination_folder_id**, confirm, dry_run_only  
+Parameters: **message_ids**, **destination_folder_id**, confirm, dry_run_only
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `mail_copy` · write
 
 Copy messages into another folder, leaving the originals in place.
 
-Parameters: **message_ids**, **destination_folder_id**, confirm  
+Parameters: **message_ids**, **destination_folder_id**, confirm
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `mail_archive` · write
 
 Archive messages using each account's configured archive layout.
 
-Parameters: **message_ids**, confirm  
+Parameters: **message_ids**, confirm
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `mail_delete` · **destructive**
@@ -120,7 +132,8 @@ Delete messages. Moves to Trash unless `permanent=true`.
 A permanent delete cannot be undone from Thunderbird, so prefer the default
 and let the user empty Trash themselves.
 
-Parameters: **message_ids**, permanent, confirm, dry_run_only  
+Parameters: **message_ids**, permanent, confirm, dry_run_only
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `mail_tags` · read
@@ -136,14 +149,93 @@ Create a tag, or recolour/rename an existing one.
 `color` is `#RRGGBB`. Omit `key` to create a new tag; pass an existing key to
 update it.
 
-Parameters: **label**, key, color, confirm  
+Parameters: **label**, key, color, confirm
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `mail_tag_delete` · **destructive**
 
 Remove a tag definition. Messages keep the raw keyword but lose the label.
 
-Parameters: **key**, confirm  
+Parameters: **key**, confirm
+
+*(bold means required; `confirm` is the confirmation gate)*
+
+### `mail_batch_preview` · read
+
+Preview changes to up to 500 messages without changing mail.
+
+A plan fixes the exact messages and expires after 15 minutes. Mark changes
+read/flagged state and tags; move supports concrete folders in one account.
+Any invalid message prevents applying the plan. History and undo metadata
+stay local for seven days; message bodies are never stored in the journal.
+`changes` accepts read, flagged, add_tags and remove_tags. The separate
+fields are aliases; do not combine them with a changes object.
+
+Parameters: **message_ids**, **action**, changes, destination_folder_id, read, flagged, add_tags, remove_tags
+
+*(bold means required; `confirm` is the confirmation gate)*
+
+### `mail_batch_apply` · write
+
+Apply a preview once and return its operation id for tb_operation_status.
+
+Repeating the same plan returns the existing operation, never a second job.
+Conflicts are reported per message. An uncertain outcome stops further work.
+
+Parameters: **plan_id**, confirm
+
+*(bold means required; `confirm` is the confirmation gate)*
+
+### `mail_batch_undo` · write
+
+Undo confirmed batch changes whose touched fields have not changed again.
+
+Messages changed by someone else are reported as conflicts. Unknown results
+are never guessed. Repeating the call returns the existing undo operation.
+
+Parameters: **operation_id**, confirm
+
+*(bold means required; `confirm` is the confirmation gate)*
+
+### `mail_followups` · read
+
+Find possible follow-ups using outgoing mail and indexed reply headers.
+
+A candidate is not proof that a reply is required. By default inspect the
+last 30 days for conversations waiting at least seven days. Human replies
+close a conversation; automatic replies, mailing lists and self-only mail
+are excluded. Results name their evidence and incomplete coverage. No
+message is sent and no reminder is created. Continue with only cursor and
+limit; snapshots expire after five minutes.
+
+Parameters: account_id, lookback_days, waiting_days, limit, cursor
+
+*(bold means required; `confirm` is the confirmation gate)*
+
+### `mail_attachments_plan` · read
+
+Preview attachment downloads from up to 100 selected messages.
+
+The existing absolute directory, source attachments and safe collision-free
+names are frozen for 15 minutes. Filters use filename substrings and exact
+MIME types, not PDF contents. Limits are 200 attachments, 25 MiB per file and
+250 MiB total. Invalid selections must be corrected before saving.
+
+Parameters: **message_ids**, **directory**, filename_contains, content_types
+
+*(bold means required; `confirm` is the confirmation gate)*
+
+### `mail_attachments_save` · write
+
+Save a frozen attachment plan once, without overwriting existing files.
+
+Returns an operation id for tb_operation_status. Repeating the same plan
+returns the existing job. Results identify each source, path and checksum;
+successfully written files are not automatically deleted on cancellation.
+
+Parameters: **plan_id**, confirm
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ## `folders` — 15 tools *(in the default toolset)*
@@ -163,7 +255,8 @@ Counts come from Thunderbird's own folder database. On IMAP that database
 can lag until the folder has been selected once in Thunderbird, so treat
 unread and total counts as close rather than exact.
 
-Parameters: account_id, name, parent_id, special_use, is_virtual, is_tag, is_unified, is_favorite, is_root, has_unread_messages, depth, tree, include_counts, limit  
+Parameters: account_id, name, parent_id, special_use, is_virtual, is_tag, is_unified, is_favorite, is_root, has_unread_messages, depth, tree, include_counts, limit
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `folder_get` · read
@@ -173,7 +266,8 @@ Get one folder: counts, special use, flags and IMAP quota.
 Use this to re-check a count after a move or a delete; `folder_list` is the
 cheaper way to find the id in the first place.
 
-Parameters: **folder_id**, include_subfolders  
+Parameters: **folder_id**, include_subfolders
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `folder_capabilities` · read
@@ -184,7 +278,8 @@ Answers whether the folder can hold messages, take subfolders, be renamed,
 be deleted, or have messages deleted from it. Worth a call before offering
 the user a plan that a server would refuse.
 
-Parameters: **folder_id**  
+Parameters: **folder_id**
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `folder_get_unified` · read
@@ -194,21 +289,24 @@ Get the unified folder that spans every account, e.g. all inboxes at once.
 Its id works anywhere a folder id is accepted, so `mail_list` on the unified
 inbox lists new mail across all accounts in one call.
 
-Parameters: **folder_type**, include_subfolders  
+Parameters: **folder_type**, include_subfolders
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `folder_create` · write
 
 Create a folder inside another folder, or at the top of an account.
 
-Parameters: **name**, parent_id, account_id, confirm  
+Parameters: **name**, parent_id, account_id, confirm
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `folder_rename` · write
 
 Rename a folder, keeping its messages and subfolders.
 
-Parameters: **folder_id**, **new_name**, confirm  
+Parameters: **folder_id**, **new_name**, confirm
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `folder_move` · write
@@ -219,14 +317,16 @@ Move a folder under a different parent, with its subfolders.
 move it to the top level. Across accounts this copies then deletes, which on
 IMAP can take a while.
 
-Parameters: **folder_id**, **destination_id**, confirm, dry_run_only  
+Parameters: **folder_id**, **destination_id**, confirm, dry_run_only
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `folder_copy` · write
 
 Copy a folder and its contents under another parent, leaving the original.
 
-Parameters: **folder_id**, **destination_id**, confirm  
+Parameters: **folder_id**, **destination_id**, confirm
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `folder_delete` · **destructive**
@@ -237,7 +337,8 @@ Thunderbird moves the folder to Trash unless it is already inside Trash, in
 which case it goes for good. Check `folder_get` first if the count matters —
 the reply reports what was removed, but cannot put it back.
 
-Parameters: **folder_id**, confirm, dry_run_only  
+Parameters: **folder_id**, confirm, dry_run_only
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `folder_mark_read` · write
@@ -247,7 +348,8 @@ Mark every message in a folder as read.
 There is no per-message undo for this, which is why it asks first. On IMAP
 the flags are pushed to the server.
 
-Parameters: **folder_id**, include_subfolders, confirm  
+Parameters: **folder_id**, include_subfolders, confirm
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `folder_set_favorite` · write
@@ -258,7 +360,8 @@ Cosmetic and reversible — it only affects the folder pane's Favourites view,
 so it is not gated. Prompting for something this harmless would only train
 the user to click through the prompts that do matter.
 
-Parameters: **folder_id**, favorite  
+Parameters: **folder_id**, favorite
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `folder_empty_trash` · **destructive**
@@ -269,7 +372,8 @@ This is not recoverable from Thunderbird. Give `account_id` and the account's
 configured Trash is used; give `folder_id` to empty a specific one. Subfolders
 of Trash are removed too unless `remove_subfolders=false`.
 
-Parameters: account_id, folder_id, remove_subfolders, confirm, dry_run_only  
+Parameters: account_id, folder_id, remove_subfolders, confirm, dry_run_only
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `folder_empty_junk` · **destructive**
@@ -279,7 +383,8 @@ Permanently delete everything in one account's Junk folder.
 Subfolders of Junk are emptied but kept, since they are usually filter
 targets the user set up deliberately. Not recoverable.
 
-Parameters: account_id, folder_id, confirm, dry_run_only  
+Parameters: account_id, folder_id, confirm, dry_run_only
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `folder_sync_offline` · write
@@ -289,7 +394,8 @@ Fetch an IMAP folder's message bodies so they are available offline.
 This is what `mail_get_source` needs before it can return raw source for an
 IMAP message. A large folder means a long download and real network traffic.
 
-Parameters: **folder_id**, include_subfolders, confirm  
+Parameters: **folder_id**, include_subfolders, confirm
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `folder_compact` · write
@@ -300,10 +406,11 @@ Deleted mail stays in the message store until the folder is compacted. Pass
 `folder_id` for one folder or `account_id` for all of an account's. Nothing
 readable is lost, but the store is rewritten, so do not interrupt it.
 
-Parameters: folder_id, account_id, confirm  
+Parameters: folder_id, account_id, confirm
+
 *(bold means required; `confirm` is the confirmation gate)*
 
-## `compose` — 6 tools *(in the default toolset)*
+## `compose` — 9 tools *(in the default toolset)*
 
 Sending, replying, forwarding, drafts and templates.
 
@@ -317,7 +424,8 @@ asks for confirmation, because the identical call with `mode="send"` would
 deliver it. Set `reply_to_message_id` to thread the message under an existing
 one — but `mail_reply` is usually what you want, since it also quotes.
 
-Parameters: **to**, **subject**, **body**, cc, bcc, is_html, attachments, identity_id, mode, reply_to_message_id, priority, return_receipt, delivery_format, custom_headers, confirm, dry_run_only  
+Parameters: **to**, **subject**, **body**, cc, bcc, is_html, attachments, identity_id, mode, request_key, reply_to_message_id, priority, return_receipt, delivery_format, custom_headers, confirm, dry_run_only
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `mail_reply` · **destructive**
@@ -329,7 +437,8 @@ Thunderbird derives the recipients, the subject and the quoted original;
 answers the mailing list. Passing `cc` replaces the addresses Thunderbird
 derived, so leave it unset unless that is the intent.
 
-Parameters: **message_id**, **body**, reply_all, reply_to_list, quote_original, is_html, subject, cc, bcc, attachments, identity_id, mode, confirm  
+Parameters: **message_id**, **body**, reply_all, reply_to_list, quote_original, is_html, subject, cc, bcc, attachments, identity_id, mode, request_key, confirm
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `mail_forward` · **destructive**
@@ -340,7 +449,8 @@ Forward a message. Saves a reviewable draft unless `mode="send"`.
 `.eml`, which preserves the headers a recipient may need. `body` is your
 covering note and goes above the forwarded text.
 
-Parameters: **message_id**, **to**, body, forward_as, cc, bcc, subject, is_html, attachments, identity_id, mode, confirm  
+Parameters: **message_id**, **to**, body, forward_as, cc, bcc, subject, is_html, attachments, identity_id, mode, request_key, confirm
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `mail_draft_save` · write
@@ -352,7 +462,48 @@ thing to produce when you want the user to review before anything is sent.
 A template is the reusable kind: Thunderbird keeps it in Templates and opens
 a copy when the user picks it. Recipients are optional here, unlike a send.
 
-Parameters: subject, body, to, cc, bcc, kind, is_html, attachments, identity_id  
+Parameters: subject, body, to, cc, bcc, kind, is_html, attachments, identity_id
+
+*(bold means required; `confirm` is the confirmation gate)*
+
+### `mail_draft_get` · read
+
+Read a saved draft and its revision without opening a composer.
+
+Pass exactly one reference. Protected or oversized drafts return metadata
+with editable=false; a preview must never be used as a replacement body.
+Unsaved changes in an open Thunderbird window are not this saved snapshot.
+
+Parameters: message_id, draft_ref
+
+*(bold means required; `confirm` is the confirmation gate)*
+
+### `mail_draft_update` · write
+
+Update the saved draft only if its reviewed revision is still current.
+
+Omitted fields stay unchanged; an empty recipient list clears that field.
+Body replaces the complete body, including any signature, in its existing
+format. Sender identity cannot change. If the user's composer is open,
+return DRAFT_BUSY and leave the window for the user to save or close.
+Reuse request_key to retrieve an operation without applying it twice.
+`changes` accepts subject, body, to, cc, bcc, add_attachments and
+remove_attachment_refs. Separate fields are aliases; use one form only.
+
+Parameters: **draft_ref**, **expected_revision**, **request_key**, changes, subject, body, to, cc, bcc, add_attachments, remove_attachment_refs
+
+*(bold means required; `confirm` is the confirmation gate)*
+
+### `mail_draft_send` · **destructive**
+
+Send exactly the saved draft revision the user reviewed, or queue it.
+
+A changed or open draft is refused. Reuse request_key after interruption;
+unknown means sending may have occurred and must not be retried with a new
+key. mode=later queues in Outbox, not at a scheduled date.
+
+Parameters: **draft_ref**, **expected_revision**, **request_key**, mode, confirm
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `mail_compose_open` · write
@@ -364,7 +515,8 @@ when the user declined a send: they get the draft in front of them with the
 cursor in it. Nothing is sent or saved, and the user sees the window appear,
 so this is not gated.
 
-Parameters: to, subject, body, cc, bcc, is_html, attachments, identity_id, reply_to_message_id, forward_message_id, reply_all, quote_original  
+Parameters: to, subject, body, cc, bcc, is_html, attachments, identity_id, reply_to_message_id, forward_message_id, reply_all, quote_original
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `mail_send_status` · read
@@ -375,7 +527,8 @@ An empty list is the normal answer. Anything here was queued with
 `mode="later"`, or written while Thunderbird was offline, and will go out on
 the next 'Send Unsent Messages'.
 
-Parameters: limit  
+Parameters: limit
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ## `search` — 7 tools *(in the default toolset)*
@@ -384,35 +537,31 @@ Ranked whole-corpus search, conversations, and saved searches.
 
 ### `search_global` · read
 
-Ranked full-corpus search across every indexed folder and account.
+Ranked search of indexed mail, with stable snapshot pagination.
 
-Best for open questions — "what did we agree about the shipment", "anything
-from the accountant about VAT". Results carry a relevance score and a
-conversation id you can pass to `search_conversation`. For precise filters
-(one folder, unread only, a date range) use `mail_search` instead.
+Start with `query`, optionally scoped to a folder. Continue with only
+`cursor=nextCursor` and `limit`; a snapshot expires after five minutes or
+a Thunderbird restart. `offset` remains for older callers. Coverage is
+indexed mail only, never a claim that the whole mailbox was searched.
+`partialReasons` explains retrieval limits or unavailable index terms.
+`alternativeSearch` suggests a literal subject search without running it
+or silently changing the original query's meaning.
+Older add-ons retain live offset pages with `snapshotSupported=false`.
 
-If this returns nothing unexpectedly, call `search_index_status`: the global
-indexer can be disabled or still catching up.
+Parameters: query, limit, offset, folder_id, cursor
 
-`matched` is how many of the retrieved messages matched, and it is the
-total only when `truncated` is absent; a truncated search ranked as deep
-as it could and there may be more below. `unmatchableTerms` names words
-the index cannot look up at all — anything that breaks into pieces of
-fewer than three characters, like "2.0" — and because every term has to
-match, one of those is enough to empty the result.
-
-Parameters: **query**, limit, offset, folder_id  
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `search_conversation` · read
 
-Every message in one thread, oldest first, across folders and accounts.
+Read a conversation oldest first, across indexed folders and accounts.
 
-Give either a `message_id` from `mail_search` or an RFC `header_message_id`.
-This is how you reconstruct a discussion that spans Inbox, Sent and an
-archive folder without three separate searches.
+Start with one message identifier. Continue with only cursor=nextCursor
+and limit. A snapshot holds at most 1,000 messages and expires after five
+minutes; a truncated conversation is explicitly reported.
 
-Parameters: message_id, header_message_id, limit  
+Parameters: message_id, header_message_id, limit, cursor
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `search_index_status` · read
@@ -442,7 +591,8 @@ the IMAP server to run the search instead of using the local database.
 
 Nothing is copied or moved — a saved search is a stored query.
 
-Parameters: **name**, **search_folder_ids**, **terms**, match_all, online_search, parent_folder_id, confirm, dry_run_only  
+Parameters: **name**, **search_folder_ids**, **terms**, match_all, online_search, parent_folder_id, confirm, dry_run_only
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `search_saved_update` · write
@@ -453,7 +603,8 @@ Only what you pass is replaced; `terms` replaces the whole condition list
 rather than merging, because a partial merge has no sensible meaning for a
 boolean query.
 
-Parameters: **saved_search**, search_folder_ids, terms, online_search, confirm, dry_run_only  
+Parameters: **saved_search**, search_folder_ids, terms, online_search, confirm, dry_run_only
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `search_saved_delete` · **destructive**
@@ -463,7 +614,8 @@ Remove a saved search. The messages it listed are not touched.
 A saved search only stores a query, so deleting one loses the query and
 nothing else — but the query itself is not recoverable, hence the prompt.
 
-Parameters: **saved_search**, confirm  
+Parameters: **saved_search**, confirm
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ## `contacts` — 13 tools
@@ -480,7 +632,8 @@ every address book, and `primaryEmail` on each result is the address
 Thunderbird itself would use. Set `include_remote=false` to skip LDAP and
 CardDAV books, which can be slow.
 
-Parameters: **query**, address_book_id, include_remote, limit  
+Parameters: **query**, address_book_id, include_remote, limit
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `contact_list` · read
@@ -491,7 +644,8 @@ For finding a particular person use `contact_search` instead. Continue with
 `cursor=nextCursor`; a cursor is only valid while the set of address books
 stays as it was.
 
-Parameters: address_book_id, limit, cursor  
+Parameters: address_book_id, limit, cursor
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `contact_get` · read
@@ -501,7 +655,8 @@ Read one contact in full, including its raw vCard.
 `include_photo` adds the picture as a data URL, which is large — leave it off
 unless the picture is the point.
 
-Parameters: **contact_id**, include_photo  
+Parameters: **contact_id**, include_photo
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `contact_create` · write
@@ -513,7 +668,8 @@ The first address in `emails` becomes the preferred one. `birthday` is
 complete `vcard` instead of the fields. Address book ids come from
 `addressbook_list`.
 
-Parameters: **address_book_id**, display_name, first_name, last_name, emails, phones, organisation, job_title, nickname, birthday, notes, vcard, confirm  
+Parameters: **address_book_id**, display_name, first_name, last_name, emails, phones, organisation, job_title, nickname, birthday, notes, vcard, confirm
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `contact_update` · write
@@ -524,7 +680,8 @@ Fields you omit are left alone; `""` or an empty list clears one. Passing
 `emails` or `phones` replaces the whole set, so include the addresses you
 want to keep. A `vcard` replaces the entire contact.
 
-Parameters: **contact_id**, display_name, first_name, last_name, emails, phones, organisation, job_title, nickname, birthday, notes, vcard, confirm  
+Parameters: **contact_id**, display_name, first_name, last_name, emails, phones, organisation, job_title, nickname, birthday, notes, vcard, confirm
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `contact_delete` · **destructive**
@@ -534,7 +691,8 @@ Delete a contact. There is no Trash for contacts, so this cannot be undone.
 The contact also leaves every mailing list it was on. The returned `previous`
 holds its vCard, which is enough to recreate it with `contact_create`.
 
-Parameters: **contact_id**, confirm, dry_run_only  
+Parameters: **contact_id**, confirm, dry_run_only
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `addressbook_list` · read
@@ -544,14 +702,16 @@ List the address books, with how many contacts and lists each holds.
 `readOnly` books reject writes; `remote` ones are LDAP or CardDAV. Turn
 `include_counts` off if a remote book makes this slow.
 
-Parameters: include_counts  
+Parameters: include_counts
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `addressbook_create` · write
 
 Create an empty local address book.
 
-Parameters: **name**, confirm  
+Parameters: **name**, confirm
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `addressbook_delete` · **destructive**
@@ -561,7 +721,8 @@ Delete an address book together with all its contacts and mailing lists.
 Irreversible and usually not what the user meant — deleting one contact is
 `contact_delete`. Run with `dry_run_only=true` first to see the size of it.
 
-Parameters: **address_book_id**, confirm, dry_run_only  
+Parameters: **address_book_id**, confirm, dry_run_only
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `mailinglist_list` · read
@@ -571,7 +732,8 @@ List address book mailing lists, with member counts.
 These are Thunderbird's own distribution lists, not mailing lists you
 subscribe to. `include_members` returns each roster in full.
 
-Parameters: address_book_id, include_members  
+Parameters: address_book_id, include_members
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `mailinglist_create` · write
@@ -581,7 +743,8 @@ Create an empty mailing list in an address book.
 `nickname` is what the user types in a compose window to address the whole
 list, so it is worth setting.
 
-Parameters: **address_book_id**, **name**, nickname, description, confirm  
+Parameters: **address_book_id**, **name**, nickname, description, confirm
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `mailinglist_add_member` · write
@@ -591,14 +754,16 @@ Add an existing contact to a mailing list.
 If the contact lives in a different address book it is copied into the list's
 one; the result says so via `copiedToAddressBook`.
 
-Parameters: **mailing_list_id**, **contact_id**, confirm  
+Parameters: **mailing_list_id**, **contact_id**, confirm
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `mailinglist_remove_member` · write
 
 Take a contact off a mailing list. The contact itself is left alone.
 
-Parameters: **mailing_list_id**, **contact_id**, confirm  
+Parameters: **mailing_list_id**, **contact_id**, confirm
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ## `calendar` — 12 tools
@@ -621,7 +786,8 @@ Create a calendar and register it with Thunderbird.
 `storage` keeps events in the local profile and needs no `url`; `ics` and
 `caldav` need the file or collection URL. `color` is `#RRGGBB`.
 
-Parameters: **name**, type, url, color, confirm  
+Parameters: **name**, type, url, color, confirm
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `calendar_update` · write
@@ -631,7 +797,8 @@ Rename or recolour a calendar, or toggle read-only and disabled.
 Only the fields you pass are touched. Nothing here affects the events
 inside the calendar.
 
-Parameters: **calendar_id**, name, color, read_only, disabled, confirm  
+Parameters: **calendar_id**, name, color, read_only, disabled, confirm
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `calendar_delete` · **destructive**
@@ -642,7 +809,8 @@ Remove a calendar. Deletes its events and tasks with it.
 from Thunderbird but its data is left where it is, ready to be added
 again. Prefer it unless the user asked for the data to go too.
 
-Parameters: **calendar_id**, unregister_only, confirm, dry_run_only  
+Parameters: **calendar_id**, unregister_only, confirm, dry_run_only
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `event_list` · read
@@ -655,7 +823,8 @@ default window. `include_occurrences` expands recurring series into the
 individual meetings that fall inside the window, which is what you want
 for "what is on next week".
 
-Parameters: calendar_id, from_date, to_date, days, include_occurrences, limit, timezone  
+Parameters: calendar_id, from_date, to_date, days, include_occurrences, limit, timezone
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `event_get` · read
@@ -666,7 +835,8 @@ Searches every calendar unless `calendar_id` narrows it. For a recurring
 series this returns the series plus its next few start times; pass
 `occurrence_date` to read a single occurrence instead.
 
-Parameters: **item_id**, calendar_id, occurrence_date, timezone  
+Parameters: **item_id**, calendar_id, occurrence_date, timezone
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `event_create` · write
@@ -680,7 +850,8 @@ single day. `recurrence_rule` is an RRULE body such as
 `FREQ=WEEKLY;BYDAY=TU;COUNT=10`. Attendees are stored but no invitations
 are sent.
 
-Parameters: **title**, **start**, end, all_day, duration_minutes, calendar_id, timezone, location, description, categories, attendees, organizer, recurrence_rule, url, status, privacy, priority, confirm  
+Parameters: **title**, **start**, end, all_day, duration_minutes, calendar_id, timezone, location, description, categories, attendees, organizer, recurrence_rule, url, status, privacy, priority, confirm
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `event_update` · write
@@ -692,7 +863,8 @@ For a recurring event this rewrites the **whole series**; pass
 occurrence and leave the rest alone. The result says which it did. Pass an
 empty string to clear `location`, `description` or `url`.
 
-Parameters: **item_id**, calendar_id, occurrence_date, title, start, end, all_day, timezone, location, description, categories, attendees, organizer, recurrence_rule, url, status, privacy, priority, confirm  
+Parameters: **item_id**, calendar_id, occurrence_date, title, start, end, all_day, timezone, location, description, categories, attendees, organizer, recurrence_rule, url, status, privacy, priority, confirm
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `event_delete` · **destructive**
@@ -704,7 +876,8 @@ For a recurring item this deletes the **entire series**. Pass
 says which it did. Read the item with `event_get` first if you are not
 sure it recurs.
 
-Parameters: **item_id**, calendar_id, occurrence_date, timezone, confirm, dry_run_only  
+Parameters: **item_id**, calendar_id, occurrence_date, timezone, confirm, dry_run_only
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `task_list` · read
@@ -715,7 +888,8 @@ Unlike `event_list` this is not windowed by default: a task with no due
 date falls outside every range, and those are exactly the ones people
 forget. Pass `from_date`/`to_date` to narrow it.
 
-Parameters: calendar_id, include_completed, from_date, to_date, limit, timezone  
+Parameters: calendar_id, include_completed, from_date, to_date, limit, timezone
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `task_create` · write
@@ -726,7 +900,8 @@ Create a task. Everything but the title is optional.
 with neither still appears in Thunderbird's task list, which is where
 undated to-dos belong.
 
-Parameters: **title**, due, start, all_day, calendar_id, timezone, description, location, categories, percent_complete, completed, status, priority, recurrence_rule, confirm  
+Parameters: **title**, due, start, all_day, calendar_id, timezone, description, location, categories, percent_complete, completed, status, priority, recurrence_rule, confirm
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `task_update` · write
@@ -737,7 +912,8 @@ Only the fields you pass are touched. `completed=true` also stamps the
 completion time and sets progress to 100%. For a repeating task this
 rewrites the series unless `occurrence_date` names one instance.
 
-Parameters: **item_id**, calendar_id, occurrence_date, title, due, start, all_day, timezone, description, location, categories, percent_complete, completed, status, priority, recurrence_rule, confirm  
+Parameters: **item_id**, calendar_id, occurrence_date, title, due, start, all_day, timezone, description, location, categories, percent_complete, completed, status, priority, recurrence_rule, confirm
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ## `filters` — 8 tools
@@ -752,14 +928,16 @@ Omit `account_key` for every account. `index` is the position in the list and
 is what the other `filter_*` tools take — it shifts when filters are added,
 removed or reordered, so re-list before acting on a stale index.
 
-Parameters: account_key  
+Parameters: account_key
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `filter_get` · read
 
 Read one filter in full, by account and index.
 
-Parameters: **account_key**, **index**  
+Parameters: **account_key**, **index**
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `filter_create` · write
@@ -774,7 +952,8 @@ are applied by hand. `match_all=false` makes the conditions OR together.
 Filters act on real mail automatically from now on, so check the conditions
 carefully; `dry_run_only=true` shows what would be created.
 
-Parameters: **account_key**, **name**, **search_terms**, **actions**, run_when, match_all, enabled, position, confirm, dry_run_only  
+Parameters: **account_key**, **name**, **search_terms**, **actions**, run_when, match_all, enabled, position, confirm, dry_run_only
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `filter_update` · write
@@ -785,7 +964,8 @@ Change a filter in place. Only what you pass is touched.
 a partial merge of a boolean condition set has no sensible meaning. Read the
 current definition with `filter_get` first.
 
-Parameters: **account_key**, **index**, name, search_terms, actions, run_when, enabled, confirm, dry_run_only  
+Parameters: **account_key**, **index**, name, search_terms, actions, run_when, enabled, confirm, dry_run_only
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `filter_set_enabled` · write
@@ -794,7 +974,8 @@ Turn one filter on or off without changing its definition.
 
 Safer than deleting when you only want to stop a rule for now.
 
-Parameters: **account_key**, **index**, **enabled**, confirm  
+Parameters: **account_key**, **index**, **enabled**, confirm
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `filter_reorder` · write
@@ -804,7 +985,8 @@ Move a filter to a different position in the execution order.
 `to_index` is the position it should end up at. Order matters whenever a rule
 uses `stopExecution`, or when two rules would both move the same message.
 
-Parameters: **account_key**, **index**, **to_index**, confirm  
+Parameters: **account_key**, **index**, **to_index**, confirm
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `filter_delete` · **destructive**
@@ -814,7 +996,8 @@ Delete a filter. Thunderbird keeps no history, so the rule is gone.
 The returned `previous` block is the full definition — keep it if you might
 want to recreate the rule. Consider `filter_set_enabled` instead.
 
-Parameters: **account_key**, **index**, confirm, dry_run_only  
+Parameters: **account_key**, **index**, confirm, dry_run_only
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `filter_run` · write
@@ -825,7 +1008,8 @@ Defaults to every enabled filter on the account's Inbox. This really moves,
 tags and deletes mail according to the rules, so it is gated — and it is the
 right way to check a new filter against existing messages.
 
-Parameters: **account_key**, folder_ids, filter_indexes, confirm  
+Parameters: **account_key**, folder_ids, filter_indexes, confirm
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ## `accounts` — 18 tools
@@ -841,7 +1025,8 @@ adds host, port, security and check-for-mail settings. The `key` of each
 account (`account1`) is what every other tool in this toolset takes. No
 password is read.
 
-Parameters: include_settings  
+Parameters: include_settings
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `account_get_server` · read
@@ -852,7 +1037,8 @@ Host, port, connection security, authentication method and the
 check-for-new-mail settings. Passwords are never read; the login manager is
 out of reach of this bridge.
 
-Parameters: **account_key**  
+Parameters: **account_key**
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `account_set_server` · write
@@ -870,14 +1056,16 @@ Change one incoming server setting. Getting the connection wrong stops mail.
 account type itself cannot be changed. Passwords are never written: after a
 hostname or username change Thunderbird will ask the user to sign in again.
 
-Parameters: **account_key**, **setting**, **value**, confirm, dry_run_only  
+Parameters: **account_key**, **setting**, **value**, confirm, dry_run_only
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `account_get_junk` · read
 
 Read one account's junk-mail handling: level, whitelist, move and purge rules.
 
-Parameters: **account_key**  
+Parameters: **account_key**
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `account_set_junk` · write
@@ -889,7 +1077,8 @@ Change one junk-mail setting for an account.
 `useWhiteList`, `whiteListAbURI`, `manualMark`, `markAsReadOnSpam`.
 Folder settings take a folder URI, which `account_get_junk` reports.
 
-Parameters: **account_key**, **setting**, **value**, confirm, dry_run_only  
+Parameters: **account_key**, **setting**, **value**, confirm, dry_run_only
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `account_get_folders` · read
@@ -900,7 +1089,8 @@ These live on the identity, not the server, so an account with two identities
 can file its mail in two places. Omit `identity_key` for the account's default
 identity.
 
-Parameters: **account_key**, identity_key  
+Parameters: **account_key**, identity_key
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `account_set_folders` · write
@@ -912,14 +1102,16 @@ Change where an identity files sent mail, drafts, templates or archives.
 `archiveGranularity`, `archiveKeepFolderStructure`. Folder settings take a
 folder URI as reported by `account_get_folders`, not a folder id.
 
-Parameters: **account_key**, **setting**, **value**, identity_key, confirm, dry_run_only  
+Parameters: **account_key**, **setting**, **value**, identity_key, confirm, dry_run_only
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `account_get_sync` · read
 
 Read an account's offline and synchronisation settings.
 
-Parameters: **account_key**  
+Parameters: **account_key**
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `account_set_sync` · write
@@ -935,7 +1127,8 @@ and for POP3 `leaveMessagesOnServer`, `deleteMailLeftOnServer`,
 Turning offline storage on does not download anything by itself — use
 `folder_sync_offline` for that.
 
-Parameters: **account_key**, **setting**, **value**, confirm, dry_run_only  
+Parameters: **account_key**, **setting**, **value**, confirm, dry_run_only
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `identity_list` · read
@@ -945,7 +1138,8 @@ List the sending identities, across every account or just one.
 An identity is a from-address with its own signature, outgoing server and
 filing folders. Its `key` is what `identity_get` and `identity_set` take.
 
-Parameters: account_key  
+Parameters: account_key
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `identity_get` · read
@@ -955,7 +1149,8 @@ Read one identity in full: addresses, signature, outgoing server, filing folders
 Credentials are not part of this: the outgoing server is reported by key, and
 its password stays in the login manager.
 
-Parameters: **identity_key**  
+Parameters: **identity_key**
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `identity_set` · write
@@ -968,7 +1163,8 @@ replies and any filter that matches on it. `smtp_server_key` comes from
 `smtp_list`. Signatures go through `identity_set_signature`, and the sent or
 drafts folders through `account_set_folders`. Passwords are never written.
 
-Parameters: **identity_key**, full_name, email, reply_to, organization, compose_html, attach_vcard, smtp_server_key, do_bcc, bcc_list, catch_all, confirm, dry_run_only  
+Parameters: **identity_key**, full_name, email, reply_to, organization, compose_html, attach_vcard, smtp_server_key, do_bcc, bcc_list, catch_all, confirm, dry_run_only
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `identity_set_signature` · write
@@ -980,7 +1176,8 @@ Pass `signature` for inline text (set `is_html` when it contains markup), or
 exclusive in Thunderbird. `attach=false` keeps the text but stops appending
 it; `below_quote` controls whether the signature sits under a quoted reply.
 
-Parameters: **identity_key**, signature, is_html, file_path, attach, below_quote, confirm, dry_run_only  
+Parameters: **identity_key**, signature, is_html, file_path, attach, below_quote, confirm, dry_run_only
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `smtp_list` · read
@@ -1000,7 +1197,8 @@ Omit `port` to take the default for the chosen security (587 for STARTTLS,
 465 for TLS). No password is stored: Thunderbird prompts the user the first
 time the server is used, and this bridge never writes to the login manager.
 
-Parameters: **hostname**, port, username, socket_type, auth_method, description, make_default, confirm, dry_run_only  
+Parameters: **hostname**, port, username, socket_type, auth_method, description, make_default, confirm, dry_run_only
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `smtp_update` · write
@@ -1011,7 +1209,8 @@ Get `server_key` from `smtp_list`. Changing the hostname or username usually
 invalidates the stored password, and the user will be asked for it on the next
 send — this tool neither reads nor writes it.
 
-Parameters: **server_key**, hostname, port, username, socket_type, auth_method, description, confirm, dry_run_only  
+Parameters: **server_key**, hostname, port, username, socket_type, auth_method, description, confirm, dry_run_only
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `smtp_delete` · **destructive**
@@ -1022,14 +1221,16 @@ Thunderbird has no undo for this, and the settings are not recoverable from
 the UI, so the reply repeats them — check `smtp_list` for identities pointing
 at this key first.
 
-Parameters: **server_key**, confirm, dry_run_only  
+Parameters: **server_key**, confirm, dry_run_only
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `smtp_set_default` · write
 
 Make one SMTP server the default for identities that have none of their own.
 
-Parameters: **server_key**, confirm, dry_run_only  
+Parameters: **server_key**, confirm, dry_run_only
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ## `settings` — 11 tools
@@ -1044,7 +1245,8 @@ Reports the value, its type, whether the user has changed it from the default,
 and whether an enterprise policy has locked it. `writable` says whether this
 server would let you change it. Use `settings_describe` to find the name.
 
-Parameters: **name**  
+Parameters: **name**
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `pref_get_many` · read
@@ -1054,7 +1256,8 @@ Read up to 100 preferences in one round trip.
 Preferences that do not exist come back with `exists: false` rather than
 failing the whole call, and are listed again under `missing`.
 
-Parameters: **names**  
+Parameters: **names**
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `pref_list` · read
@@ -1065,7 +1268,8 @@ A bare prefix matches over five thousand preferences on a normal profile, so
 pass a branch and keep `limit` modest. `only_user_set=true` narrows it to what
 differs from the shipped defaults.
 
-Parameters: prefix, only_user_set, limit  
+Parameters: prefix, only_user_set, limit
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `pref_user_set` · read
@@ -1077,7 +1281,8 @@ has a few hundred of these, dominated by per-account `mail.server.*` and
 `mail.identity.*` entries. Anything that looks like a credential is redacted
 before it leaves Thunderbird.
 
-Parameters: prefix  
+Parameters: prefix
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `settings_describe` · read
@@ -1090,7 +1295,8 @@ Thunderbird, so it is cheap to call first. Value meanings are for Thunderbird
 with `pref_get`. `writable` reflects this server's allowlist, not Thunderbird's
 own locking.
 
-Parameters: area, search  
+Parameters: area, search
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `pref_set` · write
@@ -1103,7 +1309,8 @@ trap), and the call is refused with the right type if you get it wrong. Use
 `settings_describe` for the name and the allowed values, and `dry_run_only=true`
 to see the current value alongside what you propose.
 
-Parameters: **name**, **type**, **value**, confirm, dry_run_only  
+Parameters: **name**, **type**, **value**, confirm, dry_run_only
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `pref_reset` · write
@@ -1114,7 +1321,8 @@ The cleanest undo for a `pref_set` the user did not like — it removes the entr
 from `prefs.js` rather than writing the old value back. A preference already at
 its default is reported as unchanged instead of failing.
 
-Parameters: **name**, confirm  
+Parameters: **name**, confirm
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `junk_get` · read
@@ -1135,7 +1343,8 @@ Change the global junk filter settings. Only the fields you pass are touched.
 which is a real data-loss setting — prefer `"move"` unless the user asks for
 deletion by name.
 
-Parameters: manual_mark, manual_mark_mode, mark_as_read_on_spam, logging_enabled, confirm  
+Parameters: manual_mark, manual_mark_mode, mark_as_read_on_spam, logging_enabled, confirm
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `junk_train` · write
@@ -1148,7 +1357,8 @@ stays open, and training data outlives the session. Training is cumulative and
 biased corpora are hard to undo, so train on messages the user has actually
 judged rather than on a whole search result.
 
-Parameters: **header_message_ids**, **classification**, confirm, dry_run_only  
+Parameters: **header_message_ids**, **classification**, confirm, dry_run_only
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `openpgp_list_keys` · read
@@ -1161,12 +1371,37 @@ no tool here can export it; a user who wants a backup should use Thunderbird's
 own End-to-End Encryption settings. `search` matches an email address, key id or
 fingerprint; `only_secret=true` narrows to keys this user can sign with.
 
-Parameters: search, only_secret  
+Parameters: search, only_secret
+
 *(bold means required; `confirm` is the confirmation gate)*
 
-## `admin` — 7 tools *(in the default toolset)*
+## `admin` — 10 tools *(in the default toolset)*
 
 Connection status, events, diagnostics and the error console.
+
+### `tb_operation_status` · read
+
+Inspect a queued, completed or uncertain operation without repeating it.
+
+Parameters: **operation_id**, cursor, limit
+
+*(bold means required; `confirm` is the confirmation gate)*
+
+### `tb_operation_list` · read
+
+List this profile's local, body-free operation history for the last seven days.
+
+Parameters: cursor, limit
+
+*(bold means required; `confirm` is the confirmation gate)*
+
+### `tb_operation_cancel` · write
+
+Stop steps not yet started. A send already dispatched cannot be recalled.
+
+Parameters: **operation_id**
+
+*(bold means required; `confirm` is the confirmation gate)*
 
 ### `tb_status` · read
 
@@ -1184,18 +1419,20 @@ Block until Thunderbird attaches to the bridge, then report status.
 Use it after `tb_restart`, or after asking the user to start Thunderbird.
 Fails with a message naming what is missing if nothing attaches in time.
 
-Parameters: timeout_seconds  
+Parameters: timeout_seconds
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `tb_events` · read
 
 Read buffered Thunderbird notifications: new mail, folder and account changes.
 
-Poll with `since=latestSeq` from the previous call to see only what is new.
-The daemon keeps a few hundred events, so a long gap between polls can drop
-some — `latestSeq` jumping by more than you received is how you tell.
+Continue with `cursor=nextCursor`. `gap` and `resyncRequired` explain lost
+history; an old-session cursor is rejected. Legacy since=latestSeq is
+supported but cannot identify a previous daemon session.
 
-Parameters: since, limit  
+Parameters: since, limit, cursor
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `tb_diagnostics` · read
@@ -1219,7 +1456,8 @@ password or token is redacted inside Thunderbird before it is sent.
 Lines the bridge writes with `console.*` (`source: "console"`) are included
 alongside the error console's own entries, merged by time.
 
-Parameters: contains, limit  
+Parameters: contains, limit
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `tb_addons` · read
@@ -1229,7 +1467,8 @@ List installed add-ons with their enabled and signature state.
 `isBridge` marks this server's own add-on. A `signedState` of 0 is expected
 for it: the bridge is installed unsigned, which this Thunderbird permits.
 
-Parameters: kind  
+Parameters: kind
+
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `tb_restart` · **destructive**
@@ -1241,5 +1480,6 @@ the result says nothing about whether it succeeded — wait with `tb_wait`
 afterwards. Unsent compose windows and unsaved drafts are lost, so ask the
 user before you do it; a stuck sync usually does not need it.
 
-Parameters: confirm  
+Parameters: confirm
+
 *(bold means required; `confirm` is the confirmation gate)*

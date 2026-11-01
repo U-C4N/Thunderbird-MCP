@@ -12,9 +12,9 @@ guess at a timeout.
 
 from typing import Any, Literal
 
-from ..errors import TbmcpError
+from ..errors import TbmcpError, UsageError
 from ..handshake import describe_handshake
-from ..safety import DESTRUCTIVE, Gate, guard_write, large_output, require
+from ..safety import DESTRUCTIVE, MUTATING, Gate, guard_write, large_output, require
 from ..server import Registrar
 from ._common import call, changed, clamp, one_of, page
 
@@ -34,6 +34,7 @@ NO_EXPERIMENT_HINT = (
 
 
 def register(reg: Registrar) -> None:
+    register_operations(reg)
     # ------------------------------------------------------------- daemon-local
 
     @reg.read_tool(title="Thunderbird connection status")
@@ -45,6 +46,15 @@ def register(reg: Registrar) -> None:
         """
         result = await call("daemon.status", timeout=15.0)
         thunderbird = result.get("thunderbird") or {}
+        features = (thunderbird.get("capabilities") or {}).get("features") or {}
+        expected_features = (
+            "operationsV1",
+            "draftEditNative",
+            "batchUndoV1",
+            "snapshotSearchV1",
+            "followupsV1",
+            "attachmentExportV1",
+        )
         payload: dict[str, Any] = {
             "connected": bool(result.get("connected")),
             "privilegedHalf": thunderbird.get("experiment"),
@@ -57,6 +67,19 @@ def register(reg: Registrar) -> None:
             # connected" and "connecting twice a minute and failing" need opposite
             # advice, and only this tells them apart.
             "handshake": result.get("handshake"),
+            "operationJournal": result.get("operationJournal"),
+            "capabilities": thunderbird.get("capabilities") or {},
+            "runtimeEpoch": thunderbird.get("runtimeEpoch"),
+            "missingFeatures": [
+                key
+                for key in expected_features
+                if result.get("connected") and features.get(key, False) is False
+            ],
+            "unverifiedFeatures": [
+                key
+                for key in expected_features
+                if not result.get("connected") or features.get(key, False) is None
+            ],
         }
         if not payload["connected"]:
             payload["hint"] = describe_handshake(result.get("handshake")) or NOT_CONNECTED_HINT
@@ -87,25 +110,30 @@ def register(reg: Registrar) -> None:
         }
 
     @reg.read_tool(title="Recent Thunderbird events")
-    async def tb_events(since: int = 0, limit: int = 50) -> dict[str, Any]:
+    async def tb_events(
+        since: int = 0, limit: int = 50, cursor: str | None = None
+    ) -> dict[str, Any]:
         """Read buffered Thunderbird notifications: new mail, folder and account changes.
 
-        Poll with `since=latestSeq` from the previous call to see only what is new.
-        The daemon keeps a few hundred events, so a long gap between polls can drop
-        some — `latestSeq` jumping by more than you received is how you tell.
+        Continue with `cursor=nextCursor`. `gap` and `resyncRequired` explain lost
+        history; an old-session cursor is rejected. Legacy since=latestSeq is
+        supported but cannot identify a previous daemon session.
         """
+        if cursor and since:
+            raise UsageError("Pass cursor or since, not both.")
         result = await call(
             "daemon.events",
             {
                 "since": clamp(since, default=0, minimum=0, maximum=2**53, field="since"),
                 "limit": clamp(limit, default=50, minimum=1, maximum=500, field="limit"),
+                "cursor": cursor,
             },
             timeout=15.0,
         )
         return page(
             result.get("events") or [],
-            latestSeq=result.get("latestSeq"),
-            hint="Pass since=latestSeq on the next call to avoid repeats.",
+            **{k: v for k, v in result.items() if k != "events"},
+            hint="Pass cursor=nextCursor to continue without skipping events.",
         )
 
     # ----------------------------------------------------------------- inside TB
@@ -210,3 +238,40 @@ def register(reg: Registrar) -> None:
             note=(result or {}).get("note"),
             hint="Call tb_wait to block until Thunderbird is back on the bridge.",
         )
+
+
+def register_operations(reg: Registrar) -> None:
+    """Also registered for compose/mail-only clients, without duplicate tools."""
+    if "tb_operation_status" in reg.registered:
+        return
+
+    @reg.read_tool(title="Inspect an operation")
+    async def tb_operation_status(
+        operation_id: str, cursor: str | None = None, limit: int = 50
+    ) -> dict[str, Any]:
+        """Inspect a queued, completed or uncertain operation without repeating it."""
+        return await call(
+            "daemon.operations.status",
+            {
+                "operationId": operation_id,
+                "cursor": cursor,
+                "limit": clamp(limit, default=50, minimum=1, maximum=500, field="limit"),
+            },
+        )
+
+    @reg.read_tool(title="Recent operation history")
+    async def tb_operation_list(cursor: str | None = None, limit: int = 20) -> dict[str, Any]:
+        """List this profile's local, body-free operation history for the last seven days."""
+        return await call(
+            "daemon.operations.list",
+            {
+                "cursor": cursor,
+                "limit": clamp(limit, default=20, minimum=1, maximum=100, field="limit"),
+            },
+        )
+
+    @reg.write_tool(title="Stop remaining operation steps", annotations=MUTATING, interactive=False)
+    async def tb_operation_cancel(operation_id: str) -> dict[str, Any]:
+        """Stop steps not yet started. A send already dispatched cannot be recalled."""
+        guard_write("cancel operations")
+        return await call("daemon.operations.cancel", {"operationId": operation_id})

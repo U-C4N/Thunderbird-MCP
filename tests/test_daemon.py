@@ -101,30 +101,33 @@ async def test_stands_down_when_another_daemon_advertises(isolated_state) -> Non
         held.release()
 
 
-async def test_a_wedged_lock_holder_does_not_block_startup(isolated_state, monkeypatch) -> None:
-    """The failure this guards against: a live process holding the start-up lock but
-    never advertising left every later daemon standing down, and the bridge stayed
-    down until that process died."""
+async def test_a_live_unadvertised_startup_is_not_replaced(isolated_state, monkeypatch) -> None:
+    """No advertisement does not prove that a live startup finished or failed."""
     held = ipc.DaemonLock.acquire()
     assert held is not None
     assert ipc.DaemonInfo.load() is None, "no advertisement, so the holder is wedged"
-    monkeypatch.setattr("tbmcp.daemon.find_profile", lambda *_a, **_k: None)
+
+    def unexpected_profile(*_a, **_k):
+        pytest.fail("a live startup lock was bypassed")
+
+    monkeypatch.setattr("tbmcp.daemon.find_profile", unexpected_profile)
     monkeypatch.setattr("tbmcp.daemon._await_advertisement", _no_advertisement)
-    # Reaching the profile check proves it took the lock over rather than giving up.
     assert await run_daemon() == 2
+    assert held.holder() == os.getpid()
+    held.release()
 
 
 async def _no_advertisement(*, timeout: float):
     return None
 
 
-async def test_force_starts_anyway(isolated_state, monkeypatch) -> None:
-    """`--force` exists for recovery; the loser then stands down via the watchdog."""
+async def test_force_does_not_bypass_a_live_startup_lock(isolated_state, monkeypatch) -> None:
+    """Explicit retirement still uses the same single-owner startup lock."""
     held = ipc.DaemonLock.acquire()
     assert held is not None
     monkeypatch.setattr("tbmcp.daemon.find_profile", lambda *_a, **_k: None)
+    monkeypatch.setattr("tbmcp.daemon._await_advertisement", _no_advertisement)
     try:
-        # Past the singleton check, and stopped at the missing profile.
         assert await run_daemon(force=True) == 2
     finally:
         held.release()

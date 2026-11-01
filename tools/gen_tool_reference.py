@@ -3,7 +3,7 @@
 
     python tools/gen_tool_reference.py
 
-A hand-maintained list of 112 tools drifts within a week. This reads the registered
+A hand-maintained tool list drifts within a week. This reads the registered
 tools straight from the server, so the documentation cannot disagree with what a
 client will actually see.
 """
@@ -48,6 +48,10 @@ async def collect() -> dict[str, list[dict]]:
         mcp = build_server(Settings().merged_with(toolsets=(name,)))
         rows = []
         for tool in await mcp.list_tools():
+            # Operation helpers are auto-included for standalone mail/compose
+            # clients, but belong to admin in the catalogue and count only once.
+            if name != "admin" and tool.name.startswith("tb_operation_"):
+                continue
             schema = tool.input_schema or {}
             properties = schema.get("properties") or {}
             required = set(schema.get("required") or [])
@@ -92,9 +96,10 @@ def render_reference(per_toolset: dict[str, list[dict]]) -> str:
         f"All {total} tools, generated from the code by `tools/gen_tool_reference.py`.",
         "Do not edit by hand.",
         "",
-        "`read` tools cannot change anything and are the only ones registered under",
+        "`read` tools do not modify mail or export files and are the only ones registered under",
         "`--read-only`. `write` and `destructive` tools require confirmation — an explicit",
         "`confirm=true`, or an approval prompt where the client supports one.",
+        "Previews may retain local plan metadata; read cursors may retain temporary result snapshots.",
         "",
     ]
     for name, rows in per_toolset.items():
@@ -116,7 +121,7 @@ def render_reference(per_toolset: dict[str, list[dict]]) -> str:
                 "",
                 f"Parameters: {params or '*none*'}"
                 + (
-                    "  \n*(bold means required; `confirm` is the confirmation gate)*"
+                    "\n\n*(bold means required; `confirm` is the confirmation gate)*"
                     if row["params"]
                     else ""
                 ),

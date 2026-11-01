@@ -26,6 +26,13 @@ TOOLS = ROOT / "src" / "tbmcp" / "tools"
 
 # Methods the daemon answers itself; no add-on handler exists for them.
 DAEMON_LOCAL = {"daemon.status", "daemon.events", "daemon.waitForThunderbird", "daemon.shutdown"}
+DAEMON_LOCAL.update(
+    {
+        f"daemon.operations.{action}"
+        for action in ("plan", "apply", "undo", "submit", "status", "list", "cancel")
+    }
+)
+DAEMON_LOCAL.add("daemon.drafts.get")
 
 CALL_RE = re.compile(r'call\(\s*\n?\s*"([a-zA-Z][\w.]*)"')
 DEFINE_RE = re.compile(r'tbxRegistry\.define\(\s*"([^"]+)"')
@@ -79,7 +86,14 @@ def expected_scripts() -> list[str]:
     main.js last because it is what starts everything.
     """
     background = ADDON / "background"
-    lead = ["background/log.js", "background/registry.js", "background/capabilities.js"]
+    lead = [
+        "background/log.js",
+        "background/registry.js",
+        "background/operations.js",
+        "background/references.js",
+        "background/snapshots.js",
+        "background/capabilities.js",
+    ]
     handlers = sorted(
         f"background/handlers/{p.name}" for p in (background / "handlers").glob("*.js")
     )

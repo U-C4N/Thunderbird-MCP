@@ -127,6 +127,7 @@ def message_summary(message: dict[str, Any]) -> dict[str, Any]:
     """
     return {
         "id": message.get("id"),
+        "headerMessageId": message.get("headerMessageId"),
         "subject": message.get("subject"),
         "author": message.get("author"),
         "recipients": message.get("recipients") or [],

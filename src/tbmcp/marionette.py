@@ -88,9 +88,10 @@ class Marionette:
         except MarionetteError as exc:
             if "System access" in str(exc):
                 raise MarionetteError(
-                    "Thunderbird was started without -remote-allow-system-access, so "
-                    "privileged automation is refused. Restart it with both "
-                    "-marionette and -remote-allow-system-access."
+                    "Privileged automation was refused. Start only the installer "
+                    "process with MOZ_REMOTE_ALLOW_SYSTEM_ACCESS=1 and -marionette "
+                    "(older builds also need -remote-allow-system-access). "
+                    f"Thunderbird reported: {exc.message}"
                 ) from exc
             raise
         return session if isinstance(session, dict) else {}
