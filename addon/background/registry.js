@@ -76,6 +76,8 @@ var tbxError = {
     if (ex.needs) {
       payload.needs = Array.isArray(ex.needs) ? ex.needs : [ex.needs];
     }
+    if (typeof ex.recoveryWindowOpen === "boolean") payload.recoveryWindowOpen = ex.recoveryWindowOpen;
+    if (Number.isInteger(ex.tabId)) payload.tabId = ex.tabId;
     if (ex.result !== undefined) {
       // XPCOM failures carry an nsresult; it is the most useful code we have.
       payload.code = String(ex.result);
@@ -111,6 +113,9 @@ var tbxRegistry = (() => {
           `unknown method ${method}. This add-on is older than the server; ` +
             "run `tbmcp install-addon` to update it."
         );
+      }
+      if (typeof tbxOperations !== "undefined") {
+        return tbxOperations.run(method, params || {}, () => fn(params || {}, ctx || {}));
       }
       return fn(params || {}, ctx || {});
     },

@@ -189,6 +189,14 @@ def _launch(exe: pathlib.Path, extra_args: list[str], profile: ThunderbirdProfil
         "stderr": subprocess.DEVNULL,
         "close_fds": True,
     }
+    # Thunderbird 159 replaced the system-access switch with this environment
+    # opt-in. Scope it to the installer child; the ordinary restart drops it.
+    child_env = os.environ.copy()
+    if "-marionette" in extra_args:
+        child_env["MOZ_REMOTE_ALLOW_SYSTEM_ACCESS"] = "1"
+    else:
+        child_env.pop("MOZ_REMOTE_ALLOW_SYSTEM_ACCESS", None)
+    kwargs["env"] = child_env
     if sys.platform == "win32":
         kwargs["creationflags"] = 0x00000008 | 0x00000200  # DETACHED | NEW_GROUP
     else:

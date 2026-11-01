@@ -292,8 +292,6 @@
     }
     const full = await browser.messages.getFull(messageId, {
       decrypt: decrypt !== false,
-      decodeContent: true,
-      decodeHeaders: true,
     });
     const collected = { texts: [], attachments: [] };
     walkParts(full, collected);
@@ -472,7 +470,9 @@
   tbxRegistry.define("messages.delete", async (params) => {
     const ids = tbxUtil.need(params, "messageIds", "array");
     const permanent = Boolean(params.permanent);
-    await browser.messages.delete(ids, { deletePermanently: permanent });
+    // The boolean form remains supported and is required by TB128. The options
+    // object was introduced in137; do not probe a mutation by attempting it twice.
+    await browser.messages.delete(ids, permanent);
     return { deleted: ids.length, permanent };
   });
 

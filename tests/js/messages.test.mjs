@@ -74,6 +74,35 @@ function usageError(pattern) {
   };
 }
 
+describe("messages.read compatibility", () => {
+  it("reads decoded MIME on TB128 without unsupported option fields", async () => {
+    const handlers = loadHandlers({
+      async get() { return sample(1)[0]; },
+      async getFull(_id, options) {
+        assert.deepEqual(plain(options), { decrypt: false });
+        return { contentType: "text/plain", body: "Türkçe gövde", headers: {} };
+      },
+      async listAttachments() { return []; },
+    });
+    const result = await handlers.get("messages.read")({ messageId: 100, detail: "text", decrypt: false });
+    assert.match(JSON.stringify(result), /Türkçe gövde/);
+  });
+});
+
+describe("messages.delete compatibility", () => {
+  it("uses one boolean-form mutation accepted by minimum and current releases", async () => {
+    const calls = [];
+    const handlers = loadHandlers({
+      async delete(ids, permanent) {
+        assert.equal(typeof permanent, "boolean");
+        calls.push([plain(ids), permanent]);
+      },
+    });
+    await handlers.get("messages.delete")({ messageIds: [100], permanent: true });
+    assert.deepEqual(calls, [[[100], true]]);
+  });
+});
+
 describe("messages.query", () => {
   it("answers with the matching headers, not with a list id", async () => {
     const messages = fakeMessages({ folders: { [FOLDER]: sample(30) }, queryPageSize: 10 });

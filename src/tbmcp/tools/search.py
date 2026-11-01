@@ -16,7 +16,7 @@ question about a known folder, flag, sender or date range goes to `mail_search`.
 
 from typing import Any
 
-from ..errors import UsageError
+from ..errors import TbmcpError, UsageError
 from ..safety import (
     DESTRUCTIVE,
     IDEMPOTENT_WRITE,
@@ -97,97 +97,146 @@ def _check_terms(terms: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
     return terms
 
 
+async def _indexed_call(method: str, legacy: str, params: dict[str, Any]) -> tuple[dict, bool]:
+    """Keep first-page searches usable with 1.3 without pretending cursors exist."""
+    try:
+        return await call(method, params, timeout=120.0), False
+    except TbmcpError as exc:
+        if exc.code != "UNSUPPORTED_CAPABILITY" or params.get("cursor"):
+            raise
+    return await call(legacy, params, timeout=120.0), True
+
+
+def _legacy_global(result: dict, params: dict) -> dict:
+    partial = []
+    if result.get("truncated"):
+        partial.append("candidate_limit")
+    if result.get("indexEnabled") is False:
+        partial.append("index_disabled")
+    if result.get("unmatchableTerms"):
+        partial.append("unmatchable_terms")
+    payload = page(
+        result.get("hits") or result.get("messages") or [],
+        total=None if partial else result.get("matched"),
+        query=params["query"],
+        engine="global_index",
+        coverage="indexed_only",
+        requestedScope={"folderId": params["folderId"]} if params.get("folderId") else {},
+        snapshotSupported=False,
+        pagination="offset",
+        offset=params.get("offset", 0),
+        partial=bool(partial),
+        partialReasons=partial,
+        truncated=bool(result.get("truncated")),
+        compatibilityNote="The installed add-on does not support stable snapshots; offset pages may change as mail changes.",
+        **{
+            key: result[key]
+            for key in ("matched", "retrieved", "indexEnabled", "unmatchableTerms", "note")
+            if result.get(key) is not None
+        },
+    )
+    if "index_disabled" in partial or "unmatchable_terms" in partial:
+        payload["alternativeSearch"] = {
+            "tool": "mail_search",
+            "parameters": {
+                "subject": params["query"],
+                **({"folder_id": params["folderId"]} if params.get("folderId") else {}),
+            },
+            "semanticsChanged": True,
+            "note": "Literal subject substring only; choose a folder/account and date range before running it.",
+        }
+    return payload
+
+
+def _legacy_conversation(result: dict) -> dict:
+    items = result.get("messages") or []
+    truncated = isinstance(result.get("total"), int) and result["total"] > len(items)
+    return page(
+        items,
+        total=result.get("total"),
+        engine="global_index",
+        coverage="indexed_only",
+        snapshotSupported=False,
+        pagination="limit",
+        truncated=truncated,
+        partialReasons=["conversation_limit"] if truncated else [],
+        compatibilityNote="The installed add-on returns a live conversation prefix, without a snapshot cursor; increase limit up to 500 or update the add-on.",
+        **{
+            key: result[key]
+            for key in ("conversationId", "subject", "participants")
+            if result.get(key) is not None
+        },
+    )
+
+
 def register(reg: Registrar) -> None:
     # ------------------------------------------------------------- global index
 
     @reg.read_tool(title="Search everything", meta=large_output())
     async def search_global(
-        query: str,
+        query: str | None = None,
         limit: int = 25,
         offset: int = 0,
         folder_id: str | None = None,
+        cursor: str | None = None,
     ) -> dict[str, Any]:
-        """Ranked full-corpus search across every indexed folder and account.
+        """Ranked search of indexed mail, with stable snapshot pagination.
 
-        Best for open questions — "what did we agree about the shipment", "anything
-        from the accountant about VAT". Results carry a relevance score and a
-        conversation id you can pass to `search_conversation`. For precise filters
-        (one folder, unread only, a date range) use `mail_search` instead.
-
-        If this returns nothing unexpectedly, call `search_index_status`: the global
-        indexer can be disabled or still catching up.
-
-        `matched` is how many of the retrieved messages matched, and it is the
-        total only when `truncated` is absent; a truncated search ranked as deep
-        as it could and there may be more below. `unmatchableTerms` names words
-        the index cannot look up at all — anything that breaks into pieces of
-        fewer than three characters, like "2.0" — and because every term has to
-        match, one of those is enough to empty the result.
+        Start with `query`, optionally scoped to a folder. Continue with only
+        `cursor=nextCursor` and `limit`; a snapshot expires after five minutes or
+        a Thunderbird restart. `offset` remains for older callers. Coverage is
+        indexed mail only, never a claim that the whole mailbox was searched.
+        `partialReasons` explains retrieval limits or unavailable index terms.
+        `alternativeSearch` suggests a literal subject search without running it
+        or silently changing the original query's meaning.
+        Older add-ons retain live offset pages with `snapshotSupported=false`.
         """
-        if not query or not query.strip():
-            raise UsageError("query is required — pass the words to search for.")
-        result = await call(
-            "x.gloda.search",
-            {
-                "query": query,
-                "limit": clamp(limit, default=25, minimum=1, maximum=200, field="limit"),
-                "offset": max(0, offset),
-                "folderId": folder_id,
-            },
-            timeout=120.0,
-        )
-        hits = result.get("hits") or result.get("messages") or []
-        truncated = bool(result.get("truncated"))
-        # A null field reads to a model as a fact about the mailbox, so anything
-        # the add-on did not send is left out rather than sent as null.
-        reported = {
-            key: result[key]
-            for key in ("matched", "retrieved", "indexEnabled", "unmatchableTerms", "note")
-            if result.get(key) is not None
-        }
-        return page(
-            hits,
-            # `matched` counts what the ranking saw. Once the retrieval was cut
-            # short that is no longer a total of anything.
-            total=None if truncated else result.get("matched"),
-            truncated=truncated,
-            query=query,
-            **reported,
-        )
+        size = clamp(limit, default=25, minimum=1, maximum=200, field="limit")
+        if cursor:
+            if query is not None or folder_id is not None or offset:
+                raise UsageError("Pass only cursor and limit to continue a search.")
+            params: dict[str, Any] = {"cursor": cursor, "limit": size}
+        else:
+            if not query or not query.strip():
+                raise UsageError("query is required — pass the words to search for.")
+            if offset < 0:
+                raise UsageError("offset cannot be negative.")
+            params = {"query": query, "limit": size, "offset": offset}
+            if folder_id is not None:
+                params["folderId"] = folder_id
+        result, legacy = await _indexed_call("search.global", "x.gloda.search", params)
+        return _legacy_global(result, params) if legacy else result
 
     @reg.read_tool(title="Read a whole conversation", meta=large_output())
     async def search_conversation(
         message_id: int | None = None,
         header_message_id: str | None = None,
         limit: int = 100,
+        cursor: str | None = None,
     ) -> dict[str, Any]:
-        """Every message in one thread, oldest first, across folders and accounts.
+        """Read a conversation oldest first, across indexed folders and accounts.
 
-        Give either a `message_id` from `mail_search` or an RFC `header_message_id`.
-        This is how you reconstruct a discussion that spans Inbox, Sent and an
-        archive folder without three separate searches.
+        Start with one message identifier. Continue with only cursor=nextCursor
+        and limit. A snapshot holds at most 1,000 messages and expires after five
+        minutes; a truncated conversation is explicitly reported.
         """
-        if message_id is None and not header_message_id:
-            raise UsageError("Pass message_id or header_message_id.")
         params: dict[str, Any] = {
             "limit": clamp(limit, default=100, minimum=1, maximum=500, field="limit")
         }
-        if message_id is not None:
+        if cursor:
+            if message_id is not None or header_message_id is not None:
+                raise UsageError("Pass only cursor and limit to continue a conversation.")
+            params["cursor"] = cursor
+        elif message_id is not None:
+            if header_message_id is not None:
+                raise UsageError("Pass message_id or header_message_id, not both.")
             params["messageId"] = message_id
-        else:
+        elif header_message_id:
             params["headerMessageId"] = header_message_id
-        result = await call("x.gloda.conversation", params, timeout=120.0)
-        known = {
-            key: result[key]
-            for key in ("conversationId", "subject", "participants")
-            if result.get(key) is not None
-        }
-        return page(
-            result.get("messages") or [],
-            # The thread can be longer than the page asked for.
-            total=result.get("total"),
-            **known,
-        )
+        else:
+            raise UsageError("Pass message_id or header_message_id.")
+        result, legacy = await _indexed_call("search.conversation", "x.gloda.conversation", params)
+        return _legacy_conversation(result) if legacy else result
 
     @reg.read_tool(title="Global index status")
     async def search_index_status() -> dict[str, Any]:

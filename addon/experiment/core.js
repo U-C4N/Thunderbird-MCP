@@ -96,14 +96,25 @@ function needMod(key) {
 /* ------------------------------------------------------------------ helpers */
 
 const H = {
+  processIdentity() {
+    const result = {};
+    try {
+      const started = Services.startup.getStartupInfo().process;
+      if (started && typeof started.getTime === "function" && Number.isFinite(started.getTime())) {
+        result.processStartedAt = started.getTime();
+      }
+    } catch (_) { /* unavailable is not a new native process */ }
+    try { if (Number.isInteger(Services.appinfo.processID)) result.processId = Services.appinfo.processID; } catch (_) { /* optional */ }
+    return result;
+  },
   usage(message) {
     return Object.assign(new Error(message), { tbxKind: "usage" });
   },
   unsupported(message) {
     return Object.assign(new Error(message), { tbxKind: "unsupported" });
   },
-  blocked(message, needs) {
-    return Object.assign(new Error(message), { tbxKind: "blocked", needs });
+  blocked(message, needs, extra = {}) {
+    return Object.assign(new Error(message), { tbxKind: "blocked", needs, ...extra });
   },
 
   need(params, name) {
@@ -242,7 +253,8 @@ const H = {
   withTimeout(promise, ms, what) {
     let timer = null;
     const deadline = new Promise((_resolve, reject) => {
-      timer = setTimeout(() => reject(new Error(`${what} timed out after ${ms}ms`)), ms);
+      timer = setTimeout(() => reject(Object.assign(new Error(`${what} timed out after ${ms}ms`),
+        { tbxKind: "thunderbird", code: "NATIVE_TIMEOUT" })), ms);
     });
     // Whichever way the race lands, the timer has to go: an armed one holds the
     // deadline's rejection alive and keeps Thunderbird awake for nothing.
@@ -318,6 +330,7 @@ function wired(api) {
 const TBX_MODULES = {};
 
 const TBX_MODULE_NAMES = [];
+const TBX_SHUTDOWN = [];
 
 /* ===TBX_MODULES=== (build_xpi.py splices experiment/modules/*.js here) */
 
@@ -329,6 +342,13 @@ const KEEP_ALIVE_MS = 15000;
 
 this.tbx = class extends ExtensionAPI {
   onShutdown() {
+    for (const cleanup of TBX_SHUTDOWN) {
+      try {
+        cleanup();
+      } catch (ex) {
+        console.warn("[tbmcp] capability cleanup failed:", ex.message || ex);
+      }
+    }
     if (keepAliveTimer) {
       keepAliveTimer.cancel();
       keepAliveTimer = null;
@@ -489,6 +509,8 @@ this.tbx = class extends ExtensionAPI {
             name: Services.appinfo.name,
             version: Services.appinfo.version,
             buildID: Services.appinfo.appBuildID,
+            draftEditorSupported: typeof tbxDraftEditorSupported === "function" && tbxDraftEditorSupported(),
+            ...H.processIdentity(),
             platformVersion: Services.appinfo.platformVersion,
             os: Services.appinfo.OS,
             profileDir: Services.dirsvc.get("ProfD", Ci.nsIFile).path,
@@ -500,6 +522,7 @@ this.tbx = class extends ExtensionAPI {
         async availableModules() {
           return {
             loaded: TBX_MODULE_NAMES,
+            draftEditorSupported: typeof tbxDraftEditorSupported === "function" && tbxDraftEditorSupported(),
             methods: Object.keys(TBX_MODULES).sort(),
             resolvable: Object.keys(MODULE_URLS).filter((key) => Boolean(mod(key))),
           };
@@ -512,29 +535,9 @@ this.tbx = class extends ExtensionAPI {
           );
         },
 
-        async writeFile({ directory, filename, base64, overwrite }) {
-          if (!directory || !filename) {
-            throw H.usage("directory and filename are required");
-          }
-          // Reject traversal outright: the model chose this name.
-          if (/[\\/]|^\.\.?$/.test(filename)) {
-            throw H.usage("filename must not contain a path separator");
-          }
-          if (!(await IOUtils.exists(directory))) {
-            throw H.usage(`directory does not exist: ${directory}`);
-          }
-          const path = PathUtils.join(directory, filename);
-          if (!overwrite && (await IOUtils.exists(path))) {
-            throw H.blocked(
-              `${path} already exists`,
-              "overwrite=true, or a different filename"
-            );
-          }
-          const bytes = new Uint8Array(
-            Array.prototype.map.call(atob(base64), (c) => c.charCodeAt(0))
-          );
-          await IOUtils.write(path, bytes, { tmpPath: `${path}.tmp` });
-          return { path, name: filename, bytes: bytes.length };
+        async writeFile(params) {
+          if (!H.writeFileAtomic) throw H.unsupported("The local-file module did not load.");
+          return H.writeFileAtomic(params);
         },
 
         /* ------------------------------------------------- generic dispatch */
@@ -550,7 +553,7 @@ this.tbx = class extends ExtensionAPI {
             const known = Object.keys(TBX_MODULES).sort().join(", ");
             throw H.usage(`unknown privileged method ${method} (known: ${known})`);
           }
-          return handler(params || {});
+          return handler(params || {}, context.extension);
         },
       }),
     };

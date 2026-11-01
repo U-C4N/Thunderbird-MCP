@@ -57,3 +57,17 @@ def test_launch_does_not_hold_the_callers_stdout(tmp_path):
         f"the caller was held for {elapsed:.1f}s after the helper exited: the launched "
         "process inherited its stdout"
     )
+
+
+def test_privileged_environment_is_scoped_to_installer(monkeypatch):
+    from pathlib import Path
+
+    from tbmcp.addon_install import _launch
+
+    calls = []
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kwargs: calls.append(kwargs))
+    monkeypatch.setenv("MOZ_REMOTE_ALLOW_SYSTEM_ACCESS", "inherited")
+    _launch(Path("thunderbird"), ["-marionette"], None)
+    _launch(Path("thunderbird"), [], None)
+    assert calls[0]["env"]["MOZ_REMOTE_ALLOW_SYSTEM_ACCESS"] == "1"
+    assert "MOZ_REMOTE_ALLOW_SYSTEM_ACCESS" not in calls[1]["env"]

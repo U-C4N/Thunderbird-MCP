@@ -43,20 +43,27 @@ def _nulls(payload: dict) -> list[str]:
 
 
 def search_result(**overrides) -> dict:
-    """What the add-on answers `x.gloda.search` with."""
-    return {
+    """What the add-on answers `search.global` with."""
+    result = {
         "query": "invoice",
-        "hits": [HIT],
+        "items": [HIT],
+        "count": 1,
+        "totalAvailable": 1,
         "matched": 1,
         "retrieved": 75,
         "truncated": False,
         "indexEnabled": True,
         **overrides,
     }
+    if result.get("truncated"):
+        result.pop("totalAvailable", None)
+    else:
+        result["totalAvailable"] = result["matched"]
+    return result
 
 
 async def test_the_match_count_is_the_total_when_nothing_was_cut_off(fake_bridge) -> None:
-    bridge = fake_bridge({"x.gloda.search": search_result(matched=3)})
+    bridge = fake_bridge({"search.global": search_result(matched=3)})
     async with Client(_server(bridge)) as client:
         result = await client.call_tool("search_global", {"query": "invoice"})
     assert not result.is_error, _text(result)
@@ -71,7 +78,7 @@ async def test_the_match_count_is_the_total_when_nothing_was_cut_off(fake_bridge
 
 async def test_a_truncated_retrieval_reports_no_total(fake_bridge) -> None:
     """`matched` counts what the ranking saw, which is not a total of anything."""
-    bridge = fake_bridge({"x.gloda.search": search_result(matched=1000, truncated=True)})
+    bridge = fake_bridge({"search.global": search_result(matched=1000, truncated=True)})
     async with Client(_server(bridge)) as client:
         result = await client.call_tool("search_global", {"query": "invoice"})
     assert not result.is_error, _text(result)
@@ -85,7 +92,7 @@ async def test_a_truncated_retrieval_reports_no_total(fake_bridge) -> None:
 async def test_unmatchable_terms_and_a_note_reach_the_caller(fake_bridge) -> None:
     bridge = fake_bridge(
         {
-            "x.gloda.search": search_result(
+            "search.global": search_result(
                 hits=[], matched=0, unmatchableTerms=["2.0"], note="The index cannot match 2.0."
             )
         }
@@ -100,7 +107,7 @@ async def test_unmatchable_terms_and_a_note_reach_the_caller(fake_bridge) -> Non
 
 
 async def test_nothing_unmatchable_means_no_such_key(fake_bridge) -> None:
-    bridge = fake_bridge({"x.gloda.search": search_result()})
+    bridge = fake_bridge({"search.global": search_result()})
     async with Client(_server(bridge)) as client:
         result = await client.call_tool("search_global", {"query": "invoice"})
     assert not result.is_error, _text(result)
@@ -114,12 +121,13 @@ async def test_nothing_unmatchable_means_no_such_key(fake_bridge) -> None:
 async def test_a_conversation_reports_its_size_and_who_was_in_it(fake_bridge) -> None:
     bridge = fake_bridge(
         {
-            "x.gloda.conversation": {
+            "search.conversation": {
                 "conversationId": 77,
                 "subject": "Shipment",
                 "participants": ["Ada <ada@example.invalid>", "Bob <bob@example.invalid>"],
-                "messages": [HIT],
-                "total": 3,
+                "items": [HIT],
+                "count": 1,
+                "totalAvailable": 3,
             }
         }
     )
@@ -136,7 +144,14 @@ async def test_a_conversation_reports_its_size_and_who_was_in_it(fake_bridge) ->
 
 async def test_a_conversation_the_index_knows_little_about_carries_no_nulls(fake_bridge) -> None:
     bridge = fake_bridge(
-        {"x.gloda.conversation": {"conversationId": 77, "messages": [], "total": 0}}
+        {
+            "search.conversation": {
+                "conversationId": 77,
+                "items": [],
+                "count": 0,
+                "totalAvailable": 0,
+            }
+        }
     )
     async with Client(_server(bridge)) as client:
         result = await client.call_tool("search_conversation", {"header_message_id": "<m1@x>"})
@@ -146,3 +161,31 @@ async def test_a_conversation_the_index_knows_little_about_carries_no_nulls(fake
     assert "subject" not in payload
     assert "participants" not in payload
     assert _nulls(payload) == []
+
+
+async def test_snapshot_cursor_continues_without_repeating_query(fake_bridge) -> None:
+    bridge = fake_bridge({"search.global": {"items": [], "count": 0, "hasMore": False}})
+    async with Client(_server(bridge)) as client:
+        result = await client.call_tool("search_global", {"cursor": "tbs:e:1:25"})
+    assert not result.is_error
+    assert bridge.params_for("search.global") == {"cursor": "tbs:e:1:25", "limit": 25}
+
+
+async def test_cursor_cannot_change_search_scope(fake_bridge) -> None:
+    bridge = fake_bridge()
+    async with Client(_server(bridge)) as client:
+        result = await client.call_tool(
+            "search_global", {"cursor": "tbs:e:1:25", "query": "different"}
+        )
+    assert result.is_error
+    assert bridge.calls == []
+
+
+async def test_conversation_cursor_and_identifier_are_exclusive(fake_bridge) -> None:
+    bridge = fake_bridge()
+    async with Client(_server(bridge)) as client:
+        result = await client.call_tool(
+            "search_conversation", {"cursor": "tbs:e:1:25", "message_id": 1}
+        )
+    assert result.is_error
+    assert bridge.calls == []

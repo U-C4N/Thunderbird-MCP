@@ -132,6 +132,11 @@ def from_wire(method: str, payload: dict[str, Any]) -> TbmcpError:
         "thunderbird": ThunderbirdError,
         "transport": TransportError,
     }.get(kind, TbmcpError)
+    recovery = {}
+    if isinstance(payload.get("recoveryWindowOpen"), bool):
+        recovery["recoveryWindowOpen"] = payload["recoveryWindowOpen"]
+    if isinstance(payload.get("tabId"), int):
+        recovery["tabId"] = payload["tabId"]
     if cls is BlockedError:
-        return BlockedError(message, needs=payload.get("needs"), code=code)
-    return cls(message, code=code)
+        return BlockedError(message, needs=payload.get("needs"), code=code, **recovery)
+    return cls(message, code=code, **recovery)

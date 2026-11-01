@@ -14,12 +14,11 @@
  *     rejects everything outside `X-*`. Every reply and forward therefore goes
  *     through a window, briefly, even when the headless API is available.
  *
- * When a send fails we save the composition into Drafts before closing the window.
- * A stray draft is a far smaller problem than discarding a body the caller has
- * already paid for, and the user can finish it by hand.
+ * A send error may arrive after SMTP acceptance. Leave the window accessible and
+ * report an unknown outcome, without automatically saving a rescue or retrying.
  */
 
-{
+var tbxCompose = (() => {
   const DEFAULT_LIMIT = 25;
   const SEND_MODE = { send: "sendNow", later: "sendLater" };
   const SAVE_MODE = { draft: "draft", template: "template" };
@@ -320,17 +319,6 @@
     }
   }
 
-  async function rescueDraft(tabId) {
-    try {
-      const saved = await browser.compose.saveMessage(tabId, { mode: "draft" });
-      const first = ((saved || {}).messages || [])[0];
-      return first ? first.id : null;
-    } catch (ex) {
-      tbxLog.warn("could not rescue the failed composition into Drafts:", ex.message || ex);
-      return null;
-    }
-  }
-
   async function deliverTab(tabId, mode) {
     let result;
     try {
@@ -338,13 +326,18 @@
         ? await browser.compose.saveMessage(tabId, { mode: SAVE_MODE[mode] })
         : await browser.compose.sendMessage(tabId, { mode: SEND_MODE[mode] });
     } catch (ex) {
-      const rescued = isSave(mode) ? null : await rescueDraft(tabId);
-      await closeTab(tabId);
+      // SMTP may already have accepted the message even if filing in Sent failed.
+      // Do not rescue, close or replay a composer after dispatch has begun.
+      if (!isSave(mode)) {
+        throw tbxError.thunderbird(
+          "The send outcome is unknown. Check the operation status; do not send again. " +
+            tbxError.readable(ex),
+          { code: "OUTCOME_UNKNOWN" }
+        );
+      }
       throw tbxError.thunderbird(
-        `${isSave(mode) ? "saving" : "sending"} failed: ${ex.message || ex}` +
-          (rescued
-            ? ` — the composed message was kept as draft ${rescued}, so nothing was lost`
-            : "")
+        "Saving failed; the compose window was left open with its content: " +
+          tbxError.readable(ex)
       );
     }
     await closeTab(tabId);
@@ -397,11 +390,25 @@
       const tab = await openComposer("reply", params.replyToMessageId, params);
       return deliverTab(tab.id, mode);
     }
-    if (canHeadless(mode)) {
+    // Older headless-save implementations serialize HTML as text/plain despite
+    // isPlainText:false. A native editor preserves both MIME and draft format.
+    if (canHeadless(mode) && !(isSave(mode) && params.isHtml)) {
       const details = await detailsFrom(params);
-      const result = isSave(mode)
-        ? await browser.messages.saveMessage(details, { mode: SAVE_MODE[mode] })
-        : await browser.messages.sendMessage(details, { mode: SEND_MODE[mode] });
+      let result;
+      try {
+        result = isSave(mode)
+          ? await browser.messages.saveMessage(details, { mode: SAVE_MODE[mode] })
+          : await browser.messages.sendMessage(details, { mode: SEND_MODE[mode] });
+      } catch (ex) {
+        if (!isSave(mode)) {
+          throw tbxError.thunderbird(
+            "The send outcome is unknown. Check the operation status; do not send again. " +
+              tbxError.readable(ex),
+            { code: "OUTCOME_UNKNOWN" }
+          );
+        }
+        throw ex;
+      }
       return outcome(result, mode, "headless");
     }
     const tab = await openComposer("new", null, params);
@@ -517,4 +524,5 @@
           "the first time a message is held back for later sending.",
     };
   });
-}
+  return { fileFromPath, outcome };
+})();

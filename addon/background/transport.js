@@ -417,6 +417,7 @@ var tbxTransport = (() => {
         token: pairing.token,
         protocol: PROTOCOL,
         addonVersion: browser.runtime.getManifest().version,
+        runtimeEpoch: typeof tbxRuntimeEpoch === "undefined" ? null : tbxRuntimeEpoch,
         app: identity.app || tbxCapabilities.appInfoSync(),
         capabilities: identity.capabilities || tbxCapabilities.describeSync(),
       });

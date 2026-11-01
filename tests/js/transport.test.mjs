@@ -55,7 +55,7 @@ function loadCapabilities({
     browser,
     tbxError,
     tbxLog: fakeLog(),
-    tbxRegistry: { methods: () => methods },
+    tbxRegistry: { methods: () => methods, has: name => methods.includes(name) },
     setTimeout: clock.setTimeout,
     clearTimeout: clock.clearTimeout,
     console: quietConsole(),
@@ -125,6 +125,7 @@ describe("hello", () => {
       token: "tok",
       protocol: 1,
       addonVersion: "9.9.9",
+      runtimeEpoch: null,
       app: { name: "Thunderbird", version: "155.0" },
       capabilities: { experiment: true },
     });

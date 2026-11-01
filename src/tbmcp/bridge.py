@@ -19,6 +19,7 @@ from typing import Any
 
 from . import ipc
 from .errors import NotConnectedError, TimeoutError_, TransportError, from_wire
+from .methods import replay_safe
 
 log = logging.getLogger("tbmcp.bridge")
 
@@ -39,7 +40,7 @@ _DAEMON_LOCAL = frozenset(
 
 
 def _daemon_local(method: str) -> bool:
-    return method in _DAEMON_LOCAL
+    return method.startswith("daemon.")
 
 
 class Bridge:
@@ -209,6 +210,7 @@ class Bridge:
         _retry: bool = True,
     ) -> Any:
         timeout = timeout if timeout is not None else self.default_timeout
+        _retry = _retry and replay_safe(method, params or {})
         await self._ensure()
         # The add-on dials out, so on a cold start the daemon exists a second or two
         # before Thunderbird is attached. Waiting once, deliberately, is far better
@@ -243,7 +245,10 @@ class Bridge:
                 return await self.call(
                     method, params, timeout=timeout, on_progress=on_progress, _retry=False
                 )
-            raise TransportError(f"could not reach the daemon: {exc}", code="WRITE_FAILED") from exc
+            raise TransportError(
+                f"Could not confirm the request outcome; it was not repeated: {exc}",
+                code="OUTCOME_UNKNOWN",
+            ) from exc
 
         try:
             return await asyncio.wait_for(future, timeout=timeout)

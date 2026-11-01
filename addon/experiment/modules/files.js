@@ -123,30 +123,94 @@ TBX_MODULE_NAMES.push("files");
     };
   };
 
-  TBX_MODULES["files.write"] = async (params) => {
+  function safeFilename(value) {
+    let name = String(value || "attachment").normalize("NFC")
+      .replace(/[<>:"/\\|?*\x00-\x1f\x7f]/g, "_").replace(/[. ]+$/g, "").trim();
+    if (!name || name === "." || name === "..") name = "attachment";
+    if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name)) name = `_${name}`;
+    const dot = name.lastIndexOf(".");
+    const extension = dot > 0 && name.length - dot <= 20 ? name.slice(dot) : "";
+    const stem = extension ? name.slice(0, -extension.length) : name;
+    return `${Array.from(stem).slice(0, 180 - extension.length).join("")}${extension}`;
+  }
+
+  async function directoryPath(params) {
     const directory = absolutePath(params, "directory");
-    const filename = String(H.need(params, "filename"));
-    const base64 = H.need(params, "base64");
-    // The model chose this name, so treat a separator as attempted traversal rather
-    // than a typo.
-    if (/[\\/]/.test(filename) || filename === "." || filename === "..") {
-      throw H.usage("filename must be a bare name, with no path separator");
-    }
     const info = await statOrNull(directory);
-    if (!info) {
-      throw H.usage(`directory does not exist: ${directory}`);
+    if (!info || info.type !== "directory") throw H.usage(`directory does not exist or is not a directory: ${directory}`);
+    return directory;
+  }
+
+  async function fileHash(path) {
+    if (IOUtils.computeHexDigest) return IOUtils.computeHexDigest(path, "sha256");
+    const bytes = await IOUtils.read(path, { maxBytes: MAX_READ_BYTES + 1 });
+    if (bytes.length > MAX_READ_BYTES) throw H.usage("File exceeds the 25 MiB hashing limit.");
+    const hash = Cc["@mozilla.org/security/hash;1"].createInstance(Ci.nsICryptoHash);
+    hash.init(hash.SHA256);
+    hash.update(bytes, bytes.length);
+    return Array.from(hash.finish(false), (c) => c.charCodeAt(0).toString(16).padStart(2, "0")).join("");
+  }
+
+  TBX_MODULES["files.prepareNames"] = async (params) => {
+    const directory = await directoryPath(params);
+    if (!Array.isArray(params.names) || params.names.length > 200) throw H.usage("names must be an array of at most 200 filenames.");
+    const reserved = new Set();
+    const files = [];
+    for (const originalName of params.names) {
+      const clean = safeFilename(originalName);
+      const dot = clean.lastIndexOf(".");
+      const extension = dot > 0 && clean.length - dot <= 20 ? clean.slice(dot) : "";
+      const stem = extension ? clean.slice(0, -extension.length) : clean;
+      let name = clean, path;
+      let suffix = 1;
+      for (;;) {
+        path = PathUtils.join(directory, name);
+        if (!reserved.has(name.toLocaleLowerCase("en-US")) && !(await IOUtils.exists(path))) break;
+        if (++suffix > 10000) throw H.usage("Too many colliding attachment filenames; choose another directory.");
+        const tail = ` (${suffix})`;
+        name = `${Array.from(stem).slice(0, 180 - extension.length - tail.length).join("")}${tail}${extension}`;
+      }
+      reserved.add(name.toLocaleLowerCase("en-US"));
+      files.push({ originalName: String(originalName || ""), name, path });
     }
-    if (info.type !== "directory") {
-      throw H.usage(`${directory} is not a directory`);
+    return { directory, files };
+  };
+
+  H.writeFileAtomic = async (params) => {
+    const directory = await directoryPath(params);
+    const filename = String(H.need(params, "filename"));
+    if (/[\\/\x00]/.test(filename) || filename === "." || filename === ".." || /:/.test(filename)) {
+      throw H.usage("filename must be a bare name, with no path separator or stream suffix");
     }
     const path = PathUtils.join(directory, filename);
-    if (!params.overwrite && (await IOUtils.exists(path))) {
-      throw H.blocked(`${path} already exists`, "overwrite=true, or a different filename");
+    if (!params.overwrite && await IOUtils.exists(path)) throw H.blocked(`${path} already exists`, "overwrite=true, or a different filename");
+    const bytes = fromBase64(params.base64 ?? "");
+    // The unique temporary lives beside its destination, so the final move is
+    // atomic. Only this exact internally-created temporary may be removed.
+    const temporary = await IOUtils.createUniqueFile(directory, ".tbmcp-", 0o600);
+    let created = true;
+    try {
+      await IOUtils.write(temporary, bytes, { flush: true });
+      const sha256 = params.hash ? await fileHash(temporary) : null;
+      if (params.expectedSha256 && sha256 !== params.expectedSha256) throw H.blocked("Attachment content changed before writing.", [], { code: "ATTACHMENT_CHANGED" });
+      try { await IOUtils.move(temporary, path, { noOverwrite: !params.overwrite }); }
+      catch (ex) {
+        if (!params.overwrite && await IOUtils.exists(path)) throw H.blocked(`${path} already exists`, "overwrite=true, or a different filename");
+        throw ex;
+      }
+      created = false;
+      return { path, name: filename, bytes: bytes.length, ...(sha256 ? { sha256 } : {}) };
+    } finally {
+      if (created) { try { await IOUtils.remove(temporary, { ignoreAbsent: true }); } catch (_) { /* only our temporary */ } }
     }
-    const bytes = fromBase64(base64);
-    // Write via a temp file and rename: a half-written attachment on disk is worse
-    // than none, and the caller has already been told the write succeeded.
-    await IOUtils.write(path, bytes, { tmpPath: `${path}.tmp` });
-    return { path, name: filename, bytes: bytes.length };
   };
+  TBX_MODULES["files.write"] = (params) => H.writeFileAtomic(params);
+  TBX_MODULES["files.hash"] = async (params) => {
+    const path = absolutePath(params, "path");
+    const info = await statOrNull(path);
+    if (!info) return { path, exists: false };
+    if (info.type !== "regular" || info.size > MAX_READ_BYTES) return { path, exists: true, hashAvailable: false };
+    return { path, exists: true, bytes: info.size, sha256: await fileHash(path) };
+  };
+  if (typeof TBX_TEST_HOOKS !== "undefined") TBX_TEST_HOOKS.files = { safeFilename };
 }

@@ -39,6 +39,7 @@ var tbxCapabilities = (() => {
 
   /** Everything except the privileged module list, which needs a round trip. */
   function snapshot(privilegedModules) {
+    const nativeEditor = privilegedModules?.draftEditorSupported ?? lastAppInfo?.draftEditorSupported ?? null;
     return {
       experiment: Boolean(browser.tbx),
       namespaces: WATCHED_NAMESPACES.filter((name) => Boolean(browser[name])),
@@ -46,6 +47,14 @@ var tbxCapabilities = (() => {
       methods: tbxRegistry.methods(),
       // Surfaced so the server can adapt instead of guessing from a version number.
       features: {
+        operationsV1: typeof tbxOperations !== "undefined",
+        guardedMailV1: typeof tbxReferences !== "undefined",
+        draftRead: tbxRegistry.has("compose.draftGet"),
+        draftEditNative: Boolean(browser.tbx) && tbxRegistry.has("compose.draftUpdate") && nativeEditor,
+        batchUndoV1: Boolean(browser.tbx) && typeof tbxReferences !== "undefined" && tbxRegistry.has("messages.batchStep") && tbxRegistry.has("x.batch.move"),
+        snapshotSearchV1: typeof tbxSnapshots !== "undefined" && tbxRegistry.has("search.global"),
+        followupsV1: Boolean(browser.tbx) && tbxRegistry.has("messages.followups"),
+        attachmentExportV1: Boolean(browser.tbx) && tbxRegistry.has("messages.attachmentsSave"),
         headlessSend: Boolean(browser.messages && browser.messages.sendMessage),
         messageImport: Boolean(browser.messages && browser.messages.import),
         tagsNamespace: Boolean(browser.messages && browser.messages.tags),

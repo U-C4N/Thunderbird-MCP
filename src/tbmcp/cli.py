@@ -382,6 +382,26 @@ def _print_doctor(report: dict) -> None:
             app = tb.get("app") or {}
             line("app", f"{app.get('name')} {app.get('version')}")
     line("add-on handshakes", _handshake_line(bridge.get("handshake")))
+    operations = bridge.get("operationJournal") or {}
+    if operations:
+        line("operation history", f"local, {operations.get('retentionDays', 7)} days")
+        line("operations active", operations.get("busy"))
+        line("writes awaiting recovery", operations.get("writeBlocked"))
+        if operations.get("counts"):
+            line("operation states", operations["counts"])
+        if not operations.get("available", True):
+            line("operation history error", (operations.get("error") or {}).get("message"))
+    capabilities = ((bridge.get("thunderbird") or {}).get("capabilities") or {}).get("features", {})
+    if bridge.get("connected"):
+        line("operation support", capabilities.get("operationsV1", False))
+        editor_support = capabilities.get("draftEditNative", False)
+        line(
+            "native draft support", "not yet verified" if editor_support is None else editor_support
+        )
+        line("batch undo support", capabilities.get("batchUndoV1", False))
+        line("stable search pages", capabilities.get("snapshotSearchV1", False))
+        line("follow-up support", capabilities.get("followupsV1", False))
+        line("attachment export support", capabilities.get("attachmentExportV1", False))
     transport = report.get("addonTransport")
     if transport:
         line("add-on transport", _transport_line(transport))
@@ -559,7 +579,7 @@ def build_parser() -> argparse.ArgumentParser:
     daemon.add_argument(
         "--force",
         action="store_true",
-        help="start even when another daemon is running (it will then stand down)",
+        help="gracefully replace an idle daemon; active or unresolved writes block replacement",
     )
     daemon.set_defaults(func=cmd_daemon)
 

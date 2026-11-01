@@ -16,9 +16,11 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import hashlib
 import json
 import logging
 import os
+import sys
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
@@ -29,8 +31,17 @@ from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
 from . import ipc
-from .errors import NotConnectedError, TimeoutError_, TransportError, from_wire
+from .errors import (
+    BlockedError,
+    NotConnectedError,
+    TimeoutError_,
+    TransportError,
+    UsageError,
+    from_wire,
+)
 from .handshake import HandshakeLog, describe_handshake
+from .methods import is_read
+from .operations import Operations
 from .profile import BRIDGE_FILE, ThunderbirdProfile, find_profile
 
 log = logging.getLogger("tbmcp.daemon")
@@ -43,6 +54,13 @@ HELLO_TIMEOUT = 10.0
 handshake tests can shorten it without waiting out a real ten seconds."""
 
 ProgressCb = Callable[[dict[str, Any]], Awaitable[None]]
+
+
+def _profile_journal_id(path) -> str:
+    value = str(path.resolve())
+    if sys.platform == "win32":
+        value = value.casefold()
+    return hashlib.sha256(value.encode()).hexdigest()
 
 
 def error_payload(exc: BaseException) -> dict[str, Any]:
@@ -62,6 +80,11 @@ def error_payload(exc: BaseException) -> dict[str, Any]:
     needs = getattr(exc, "needs", None)
     if needs:
         payload["needs"] = needs
+    extra = getattr(exc, "extra", {})
+    if isinstance(extra.get("recoveryWindowOpen"), bool):
+        payload["recoveryWindowOpen"] = extra["recoveryWindowOpen"]
+    if type(extra.get("tabId")) is int:
+        payload["tabId"] = extra["tabId"]
     return payload
 
 
@@ -86,6 +109,8 @@ class AddonSession:
         self._next_id = 0
         self._pending: dict[int, _Pending] = {}
         self._closed = asyncio.Event()
+        self.uncertain: set[asyncio.Future] = set()
+        self.late_outcomes: dict[int, dict[str, Any]] = {}
 
     @property
     def has_experiment(self) -> bool:
@@ -99,6 +124,8 @@ class AddonSession:
             "namespaces": self.capabilities.get("namespaces", []),
             "connectedForSeconds": round(time.time() - self.connected_at, 1),
             "inFlight": len(self._pending),
+            "runtimeEpoch": self.hello.get("runtimeEpoch"),
+            "capabilities": self.capabilities,
         }
 
     async def call(
@@ -116,6 +143,13 @@ class AddonSession:
                 f"{method} needs the privileged half of the add-on, which did not load. "
                 "Reinstall with `tbmcp install-addon` and check Thunderbird's error console.",
                 code="NO_EXPERIMENT",
+            )
+        if method in {"search.global", "search.conversation", "messages.followups"} and (
+            method not in self.capabilities.get("methods", [])
+        ):
+            raise BlockedError(
+                f"{method} is unavailable in the connected add-on; install the matching add-on.",
+                code="UNSUPPORTED_CAPABILITY",
             )
         self._next_id += 1
         request_id = self._next_id
@@ -135,13 +169,30 @@ class AddonSession:
             self._pending.pop(request_id, None)
             raise NotConnectedError() from exc
         try:
-            return await asyncio.wait_for(pending.future, timeout=timeout)
-        except TimeoutError:
-            with contextlib.suppress(ConnectionClosed):
-                await self.ws.send(json.dumps({"t": "cancel", "id": request_id}))
+            return await asyncio.wait_for(asyncio.shield(pending.future), timeout=timeout)
+        except (TimeoutError, asyncio.CancelledError) as exc:
+            # Cancellation cannot roll a native mutation back. Keep the late
+            # response so the daemon can tell when a timed-out write has ended.
+            self.uncertain.add(pending.future)
+
+            def completed(future):
+                self.uncertain.discard(future)
+                self._pending.pop(request_id, None)
+                if not future.cancelled():
+                    error = future.exception()
+                    self.late_outcomes[request_id] = (
+                        {"error": error} if error else {"result": future.result()}
+                    )
+                    if len(self.late_outcomes) > 64:
+                        self.late_outcomes.pop(next(iter(self.late_outcomes)))
+
+            pending.future.add_done_callback(completed)
+            if isinstance(exc, asyncio.CancelledError):
+                raise
             raise TimeoutError_(method, timeout) from None
         finally:
-            self._pending.pop(request_id, None)
+            if pending.future not in self.uncertain:
+                self._pending.pop(request_id, None)
 
     async def pump(self, on_event: Callable[[dict[str, Any]], None]) -> None:
         """Read frames until the add-on goes away."""
@@ -247,6 +298,11 @@ class Daemon:
         self._inflight: set[asyncio.Task[None]] = set()
         self._stop = asyncio.Event()
         self._session_ready = asyncio.Event()
+        self.event_epoch = ipc.new_token()
+        self._write_lock = asyncio.Lock()
+        self._operations: Operations | None = None
+        self._barrier_session: AddonSession | None = None
+        self._ever_connected = False
 
     # ------------------------------------------------------------------ add-on side
 
@@ -313,6 +369,11 @@ class Daemon:
             json.dumps({"t": "welcome", "protocol": ipc.PROTOCOL_VERSION, "server": "tbmcp"})
         )
         self.handshakes.resolve(ws, "welcomed", addon_version=session.addon_version)
+        if self._ever_connected:
+            self._record_event(
+                {"name": "bridge.reconnected", "data": {"resyncRequired": True, "lostCount": None}}
+            )
+        self._ever_connected = True
         log.info(
             "add-on connected: %s %s (experiment=%s)",
             session.app.get("name", "Thunderbird"),
@@ -329,6 +390,12 @@ class Daemon:
             if self.session is session:
                 self.session = None
                 self._session_ready.clear()
+                self._record_event(
+                    {
+                        "name": "bridge.disconnected",
+                        "data": {"resyncRequired": True, "lostCount": None},
+                    }
+                )
             # A no-op for a session we superseded: that outcome is already final.
             self.handshakes.resolve(ws, "disconnected", close_code=ws.close_code)
 
@@ -494,13 +561,18 @@ class Daemon:
         on_progress: ProgressCb | None,
     ) -> Any:
         """Daemon-local methods first, then anything the add-on handles."""
+        if self._stop.is_set() and not is_read(method):
+            raise BlockedError(
+                "Daemon is shutting down; reconnect before writing.", code="DAEMON_STOPPING"
+            )
         if method == "daemon.status":
             return self.status()
         if method == "daemon.events":
-            since = int(params.get("since") or 0)
-            limit = int(params.get("limit") or 100)
-            selected = [e for e in self.events if e["seq"] > since][:limit]
-            return {"events": selected, "latestSeq": self.event_seq}
+            return self._events_page(params)
+        if method.startswith("daemon.operations."):
+            return await self.operations().call(method.rsplit(".", 1)[-1], params)
+        if method == "daemon.drafts.get":
+            return await self.operations().draft_get(params)
         if method == "daemon.waitForThunderbird":
             wait = float(params.get("timeout") or 30.0)
             try:
@@ -509,13 +581,317 @@ class Daemon:
                 raise self._not_connected() from None
             return self.status()
         if method == "daemon.shutdown":
-            self._stop.set()
-            return {"stopping": True}
+            if self._write_lock.locked():
+                raise BlockedError(
+                    "A write is active or unresolved; finish it before replacing the daemon.",
+                    code="OPERATIONS_ACTIVE",
+                )
+            async with self._write_lock:
+                # Reconciliation must hold the same lock as dispatch. Otherwise
+                # an old receipt can erase the barrier of a concurrent new write.
+                if (
+                    self.session
+                    and self._operations
+                    and not self._operations.busy
+                    and self._operations.journal.barrier()
+                ):
+                    await self._clear_settled_barrier()
+                if self.writes_active(include_lock=False):
+                    raise BlockedError(
+                        "A write is active or unresolved; finish it before replacing the daemon.",
+                        code="OPERATIONS_ACTIVE",
+                    )
+                self._stop.set()
+                return {"stopping": True}
 
+        if is_read(method):
+            return await self._addon_call(method, params, timeout=timeout, on_progress=on_progress)
+        if method == "x.admin.restart":
+            # Explicit, gated recovery remains possible when an uncertain old
+            # add-on cannot produce a completion receipt.
+            return await self._addon_call(method, params, timeout=timeout, on_progress=on_progress)
+        async with self._write_lock:
+            return await self._guarded_call(
+                method, params, timeout=timeout, on_progress=on_progress
+            )
+
+    def operations(self) -> Operations:
+        if self._operations is None:
+            self._operations = Operations(self, self._operation_path())
+        return self._operations
+
+    def _operation_path(self):
+        return (
+            ipc.state_dir()
+            / "profiles"
+            / _profile_journal_id(self.profile.path)
+            / "operations.sqlite"
+        )
+
+    def journal_health(self) -> dict[str, Any]:
+        health = {"available": True, "retentionDays": 7, "busy": False, "writeBlocked": False}
+        try:
+            # Recover persisted state before reporting it, without creating a
+            # journal merely because a read-only client requested diagnostics.
+            if self._operations is None and self._operation_path().exists():
+                self.operations()
+            if self._operations:
+                journal = self._operations.journal
+                worker_error = getattr(self._operations, "health_error", None)
+                if worker_error:
+                    health.update(available=False, writeBlocked=True, error=worker_error)
+                journal.purge()
+                health.update(
+                    busy=self._operations.busy,
+                    writeBlocked=bool(worker_error or journal.barrier()),
+                    counts={
+                        row[0]: row[1]
+                        for row in journal.db.execute(
+                            "SELECT status,COUNT(*) FROM operations GROUP BY status"
+                        )
+                    },
+                )
+        except Exception as exc:
+            health.update(available=False, writeBlocked=True, error=error_payload(exc))
+        return health
+
+    def writes_active(self, *, include_lock: bool = True) -> bool:
+        health = self.journal_health()
+        if (include_lock and self._write_lock.locked()) or health["busy"]:
+            return True
+        if self._operations:
+            try:
+                # A worker health latch blocks new writes but does not prevent
+                # explicit daemon recovery once native work is proven finished.
+                return bool(self._operations.journal.barrier())
+            except Exception:
+                return True
+        return bool(health["writeBlocked"])
+
+    async def _addon_call(
+        self, method: str, params: dict, *, timeout=30.0, on_progress=None
+    ) -> Any:
         session = self.session
         if session is None:
             raise self._not_connected()
         return await session.call(method, params, timeout=timeout, on_progress=on_progress)
+
+    async def _clear_settled_barrier(self) -> None:
+        journal = self.operations().journal
+        barrier = journal.barrier()
+        if not barrier:
+            return
+        session = self.session
+        if session is None:
+            raise self._not_connected()
+        epoch = session.hello.get("runtimeEpoch")
+        # Native XPCOM work may outlive an add-on reload. A changed runtime epoch
+        # alone never proves that a filter/calendar/send has stopped.
+        settled = False
+        if barrier.get("createdAt") and (
+            barrier.get("needsRestart") or epoch != barrier.get("epoch") or not epoch
+        ):
+            try:
+                app = await self._addon_call("x.admin.appInfo", {}, timeout=15)
+                started = app.get("processStartedAt")
+                settled = (
+                    isinstance(started, (int, float)) and started > barrier["createdAt"] * 1000
+                )
+            except Exception:
+                pass
+        if (
+            not barrier.get("needsRestart")
+            and self._barrier_session is session
+            and not session._closed.is_set()
+        ):
+            outcome = session.late_outcomes.get(barrier.get("requestId"))
+            if outcome is not None:
+                result = outcome.get("result")
+                error = outcome.get("error")
+                native_unknown = (
+                    isinstance(result, dict)
+                    and (
+                        result.get("status") == "unknown"
+                        or (
+                            barrier.get("method") == "x.filters.run"
+                            and result.get("completed") is False
+                        )
+                    )
+                ) or getattr(error, "code", None) in {
+                    "NATIVE_TIMEOUT",
+                    "TIMEOUT",
+                    "OUTCOME_UNKNOWN",
+                }
+                if native_unknown:
+                    barrier["needsRestart"] = True
+                    journal.set_barrier(barrier)
+                else:
+                    settled = True
+        if (
+            not settled
+            and not barrier.get("needsRestart")
+            and epoch
+            and epoch == barrier.get("epoch")
+            and barrier.get("operationId")
+        ):
+            answer = await self._addon_call(
+                "operations.receipt",
+                {
+                    "operationId": barrier["operationId"],
+                    "itemId": barrier.get("itemId", 0),
+                    "method": barrier["method"],
+                },
+                timeout=15,
+            )
+            settled = bool(
+                answer.get("found")
+                and not answer.get("pending")
+                and (answer.get("result") or {}).get("status") != "unknown"
+                and (answer.get("error") or {}).get("code")
+                not in {"OUTCOME_UNKNOWN", "NATIVE_TIMEOUT", "TIMEOUT"}
+            )
+        if settled:
+            journal.set_barrier(None)
+            self._barrier_session = None
+            return
+        raise BlockedError(
+            "A previous write may still be running. Read its operation status; if no receipt is available, install the 1.4.0 add-on and restart Thunderbird explicitly. Reconnecting alone does not finish native work.",
+            code="WRITE_IN_FLIGHT",
+        )
+
+    async def _guarded_call(
+        self, method: str, params: dict, *, timeout=180.0, on_progress=None
+    ) -> Any:
+        if self._stop.is_set():
+            raise BlockedError(
+                "Daemon is shutting down; reconnect before writing.", code="DAEMON_STOPPING"
+            )
+        if getattr(self.operations(), "health_error", None):
+            raise BlockedError(
+                "Operation history failed; inspect status and repair it before another write.",
+                code="JOURNAL_UNHEALTHY",
+            )
+        await self._clear_settled_barrier()
+        session = self.session
+        if session is None:
+            raise self._not_connected()
+        journal = self.operations().journal
+        journal.set_barrier(
+            {
+                "epoch": session.hello.get("runtimeEpoch"),
+                "method": method,
+                "createdAt": time.time(),
+                "requestId": getattr(session, "_next_id", 0) + 1,
+                "operationId": params.get("operationId"),
+                "itemId": params.get("itemId", 0),
+            }
+        )
+        self._barrier_session = session
+        try:
+            result = await self._addon_call(
+                method, params, timeout=timeout, on_progress=on_progress
+            )
+        except TransportError as exc:
+            # TIMEOUT received as an add-on error may represent a native deadline
+            # rather than our pending transport future. In that case a completed
+            # handler receipt does not prove that the native mutation stopped.
+            if not session.uncertain and not session._closed.is_set():
+                barrier = journal.barrier() or {}
+                barrier["needsRestart"] = True
+                journal.set_barrier(barrier)
+            raise TransportError(
+                "The write may have completed; it was not repeated. Inspect operation status before doing it again.",
+                code="OUTCOME_UNKNOWN",
+                **{
+                    k: v
+                    for k, v in error_payload(exc).items()
+                    if k in {"recoveryWindowOpen", "tabId"}
+                },
+            ) from exc
+        except Exception as exc:
+            if getattr(exc, "code", None) in {"NATIVE_TIMEOUT", "OUTCOME_UNKNOWN"}:
+                barrier = journal.barrier() or {}
+                barrier["needsRestart"] = True
+                journal.set_barrier(barrier)
+                raise TransportError(
+                    "Native work may still be running; restart Thunderbird before another write.",
+                    code="OUTCOME_UNKNOWN",
+                    **{
+                        k: v
+                        for k, v in error_payload(exc).items()
+                        if k in {"recoveryWindowOpen", "tabId"}
+                    },
+                ) from exc
+            # An error response is still a receipt: the handler has finished.
+            journal.set_barrier(None)
+            self._barrier_session = None
+            raise
+        native_continues = (
+            method == "x.filters.run"
+            and isinstance(result, dict)
+            and result.get("completed") is False
+        )
+        if native_continues:
+            result = {**result, "status": "unknown", "code": "NATIVE_IN_FLIGHT"}
+        if isinstance(result, dict) and result.get("status") == "unknown":
+            barrier = journal.barrier() or {}
+            barrier["needsRestart"] = True
+            journal.set_barrier(barrier)
+        else:
+            journal.set_barrier(None)
+            self._barrier_session = None
+        return result
+
+    def _events_page(self, params: dict) -> dict:
+        since = params.get("since", 0)
+        limit = params.get("limit", 50)
+        if (
+            not isinstance(since, int)
+            or since < 0
+            or not isinstance(limit, int)
+            or not 1 <= limit <= 500
+        ):
+            raise UsageError("since must be nonnegative and limit must be 1-500.")
+        cursor = params.get("cursor")
+        if cursor:
+            if since:
+                raise UsageError("Use cursor or since, not both.")
+            try:
+                epoch, number = cursor.rsplit(":", 1)
+                since = int(number)
+                if epoch != self.event_epoch:
+                    raise UsageError(
+                        "Event cursor belongs to an earlier daemon session; resynchronise the mailbox.",
+                        code="EVENT_SESSION_CHANGED",
+                    )
+                if since < 0:
+                    raise ValueError
+            except (ValueError, AttributeError):
+                raise UsageError("Invalid event cursor.", code="INVALID_CURSOR") from None
+        if since > self.event_seq:
+            raise UsageError(
+                "Event sequence is ahead of this daemon; resynchronise.",
+                code="EVENT_SESSION_CHANGED",
+            )
+        earliest = self.events[0]["seq"] if self.events else self.event_seq + 1
+        gap = (
+            {"from": since + 1, "to": earliest - 1, "count": earliest - since - 1}
+            if since < earliest - 1
+            else None
+        )
+        selected = [e for e in self.events if e["seq"] > since][:limit]
+        delivered = selected[-1]["seq"] if selected else since
+        resync = bool(gap) or any((e.get("data") or {}).get("resyncRequired") for e in selected)
+        return {
+            "events": selected,
+            "latestSeq": delivered,
+            "newestSeq": self.event_seq,
+            "earliestAvailableSeq": earliest,
+            "nextCursor": f"{self.event_epoch}:{delivered}",
+            "hasMore": delivered < self.event_seq,
+            "gap": gap,
+            "resyncRequired": resync,
+        }
 
     def _not_connected(self) -> NotConnectedError:
         """ "Not connected", carrying the diagnosis when we have one.
@@ -538,6 +914,7 @@ class Daemon:
             "thunderbird": self.session.describe() if self.session else None,
             "connected": self.session is not None,
             "handshake": self.handshakes.summary(),
+            "operationJournal": self.journal_health(),
             # Nothing the daemon logs reaches a terminal — it is spawned detached
             # with its streams on DEVNULL — so every reporter needs the path.
             "logFile": str(ipc.daemon_log_path()),
@@ -577,7 +954,12 @@ class Daemon:
             return
         while not self._stop.is_set():
             await asyncio.sleep(30.0)
-            if self._clients == 0 and (time.time() - self._last_client_at) > self.idle_timeout:
+            if (
+                self._clients == 0
+                and not self._inflight
+                and not self.writes_active()
+                and (time.time() - self._last_client_at) > self.idle_timeout
+            ):
                 log.info("no clients for %.0fs — shutting down", self.idle_timeout)
                 self._stop.set()
 
@@ -594,6 +976,12 @@ class Daemon:
             await asyncio.sleep(20.0)
             winner = self.superseded_by()
             if winner is not None:
+                if self.writes_active():
+                    log.error(
+                        "daemon %d attempted takeover while a write is unresolved; staying alive",
+                        winner,
+                    )
+                    continue
                 log.warning("daemon %d has taken over the advertisement — standing down", winner)
                 self._stop.set()
 
@@ -657,47 +1045,87 @@ async def run_daemon(
     idle_timeout: float = DEFAULT_IDLE_TIMEOUT,
     force: bool = False,
 ) -> int:
-    # One daemon per user, because only one can hold the add-on's connection.
-    #
-    # The lock covers *startup only*, and is released as soon as the advertisement is
-    # published. Holding it for the daemon's whole life looked tidier but could wedge
-    # the system: if the holder ever stopped advertising, every later daemon stood
-    # down without publishing anything, and the bridge was stuck until that process
-    # died. The advertisement is the source of truth; the lock only stops two daemons
-    # binding in the same instant, and `_watch_superseded` handles the rest.
-    lock: ipc.DaemonLock | None = None
-    if not force:
-        lock = ipc.DaemonLock.acquire()
-        if lock is None:
-            # Someone is starting up. Give them a moment to advertise before deciding.
-            existing = await _await_advertisement(timeout=6.0)
-            if existing is not None:
-                log.info(
-                    "a daemon is already running (pid %d, control port %d); nothing to do",
-                    existing.pid,
-                    existing.port,
-                )
-                return 0
-            log.warning("a stale start-up lock is in the way; taking it over")
-            lock = ipc.DaemonLock.acquire_forcibly()
-
-    profile = find_profile(profile_hint)
-    if profile is None:
-        log.error("no Thunderbird profile found; pass --profile with an explicit path")
-        if lock is not None:
-            lock.release()
+    # --force negotiates retirement; it does not bypass startup serialization.
+    # Keep this lock through retirement/publication so two upgrade processes
+    # cannot both publish independent write queues for the same profile.
+    lock = ipc.DaemonLock.acquire()
+    if lock is None:
+        existing = await _await_advertisement(timeout=6.0)
+        if existing is not None:
+            log.info("a daemon is already starting/running (pid %d); nothing to do", existing.pid)
+            return 0
+        log.error(
+            "a live startup lock has no advertisement; finish or stop that startup before retrying"
+        )
         return 2
 
-    daemon = Daemon(profile, idle_timeout=idle_timeout, startup_lock=lock)
+    daemon = None
     try:
+        existing = ipc.DaemonInfo.load()
+        if existing is not None:
+            if not force:
+                log.info("a daemon is already running (pid %d); nothing to do", existing.pid)
+                return 0
+            if not await _retire_existing(existing):
+                return 2
+        profile = find_profile(profile_hint)
+        if profile is None:
+            log.error("no Thunderbird profile found; pass --profile with an explicit path")
+            return 2
+        daemon = Daemon(profile, idle_timeout=idle_timeout, startup_lock=lock)
         await daemon.run()
     except asyncio.CancelledError:
-        daemon._cleanup()
+        if daemon:
+            daemon._cleanup()
         raise
     finally:
-        if lock is not None:
-            lock.release()
+        lock.release()
     return 0
+
+
+async def _retire_existing(info: ipc.DaemonInfo) -> bool:
+    writer = None
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection("127.0.0.1", info.port, limit=ipc.MAX_LINE), timeout=5
+        )
+        await ipc.write_message(writer, {"t": "auth", "id": 1, "token": info.token})
+        reply = await asyncio.wait_for(ipc.read_message(reader), timeout=5)
+        if not reply or reply.get("t") != "ready":
+            raise RuntimeError("existing daemon did not authenticate")
+        await ipc.write_message(writer, {"t": "req", "id": 2, "method": "daemon.status"})
+        reply = await asyncio.wait_for(ipc.read_message(reader), timeout=5)
+        if not reply or not reply.get("ok"):
+            raise RuntimeError("existing daemon status unavailable")
+        status = reply.get("result") or {}
+        if "operationJournal" not in status:
+            # An old owner cannot atomically refuse shutdown after a new write
+            # races its status reply, nor track native work after a timeout.
+            raise RuntimeError(
+                "older daemon cannot confirm safe retirement; finish its work and explicitly restart Thunderbird and the daemon before upgrading"
+            )
+        await ipc.write_message(writer, {"t": "req", "id": 3, "method": "daemon.shutdown"})
+        reply = await asyncio.wait_for(ipc.read_message(reader), timeout=5)
+        if not reply or not reply.get("ok"):
+            detail = (reply or {}).get("error", {}).get("message", "shutdown not acknowledged")
+            raise RuntimeError(detail)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            current = ipc.DaemonInfo.load()
+            if current is None:
+                return True
+            if current.pid != info.pid:
+                raise RuntimeError("another daemon appeared during shutdown")
+            await asyncio.sleep(0.05)
+        raise RuntimeError("existing daemon has not finished shutting down")
+    except Exception as exc:
+        log.error("cannot replace daemon %d: %s", info.pid, exc)
+        return False
+    finally:
+        if writer is not None:
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
 
 
 async def _await_advertisement(*, timeout: float) -> ipc.DaemonInfo | None:

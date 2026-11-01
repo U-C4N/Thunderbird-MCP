@@ -36,7 +36,7 @@ def main() -> int:
     modules = [
         line.split('"')[1]
         for line in implementation.splitlines()
-        if line.startswith("TBX_MODULE_NAMES.push(")
+        if line.lstrip().startswith("TBX_MODULE_NAMES.push(")
     ]
     print(f"privileged modules spliced in: {', '.join(modules) or 'NONE'}")
     print(f"implementation.js: {len(implementation.splitlines())} lines")

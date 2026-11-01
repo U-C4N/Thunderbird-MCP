@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "thunderbird-mcp"
-version = "1.3.0"
+version = "1.4.0"
 description = "MCP server that drives Thunderbird — mail, folders, contacts, calendar, filters, and settings"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -57,7 +57,7 @@ packages = ["src/tbmcp"]
 "addon" = "tbmcp/_addon"
 
 [tool.hatch.build.targets.sdist]
-include = ["src/tbmcp", "addon", "docs", "tests", "README.md", "LICENSE"]
+include = ["src/tbmcp", "addon", "docs", "tests", "tools", "bootstrap.py", "README.md", "CHANGELOG.md", "LICENSE"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

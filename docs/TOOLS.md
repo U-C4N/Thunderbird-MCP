@@ -10,10 +10,13 @@ mutating tools are `set`/`create`/`update`/`delete`/`send`/`run`.
 Toolset membership drives `--toolsets`. **Default set**: `mail`, `folders`,
 `compose`, `search`, `admin`. Everything else is opt-in.
 
-As built: **112 tools** over 10 toolsets, backed by **128 bridge methods** (58 on the
-official API, 70 privileged). `--read-only` leaves 48. Counts per toolset — mail 15,
-folders 15, compose 6, search 7, contacts 13, calendar 12, filters 8, accounts 18,
-settings 11, admin 7. `tbmcp tools --toolsets all` prints the live list.
+As built: **124 tools** over 10 toolsets, backed by **149 add-on bridge methods**
+(72 background handlers and 77 privileged forwards). Daemon-local operation RPCs
+are separate from those add-on counts. `--read-only` leaves 54 tools. Counts per
+owning toolset — mail 21, folders 15, compose 9, search 7, contacts 13, calendar 12,
+filters 8, accounts 18, settings 11, admin 10. Mail/compose-only configurations also
+include the three operation observers/cancellation tools normally listed under
+admin, without duplicates. `tbmcp tools --toolsets all` prints the live list.
 
 ## mail — default
 
@@ -34,6 +37,19 @@ settings 11, admin 7. `tbmcp tools --toolsets all` prints the live list.
 | `mail_tags` | `tags.list` | |
 | `mail_tag_upsert` | `tags.upsert` | |
 | `mail_tag_delete` | `tags.delete` | gated, destructive |
+| `mail_batch_preview` | `daemon.operations.plan` → `messages.batchPreview` | freezes ≤500 messages; mark/tags or same-account move; 15-minute plan |
+| `mail_batch_apply` | `daemon.operations.apply` → `messages.batchStep` | gated; repeated plan returns the same job |
+| `mail_batch_undo` | `daemon.operations.undo` → `messages.batchUndo` | gated; verified successes only, with conflict checks |
+| `mail_followups` | `messages.followups` | bounded reply candidates, default 30-day window / seven-day wait; no sending |
+| `mail_attachments_plan` | `daemon.operations.plan` → `messages.attachmentsPlan` | metadata preview; ≤100 messages / 200 attachments / 250 MiB total |
+| `mail_attachments_save` | `daemon.operations.apply` → `messages.attachmentsPrepare` + `messages.attachmentsSave` | gated; 25 MiB/file, frozen names, atomic no-overwrite export |
+
+Batch and export jobs are observed with `tb_operation_status`. History/undo metadata
+remain local for seven days and exclude message bodies and recipient lists. A
+cancel request stops remaining steps; it does not reverse successful ones. Export
+does not provide destructive filesystem undo. Follow-up candidates include header
+evidence and partial-coverage reasons; they do not establish that every relevant
+conversation was found.
 
 ## folders — default
 
@@ -59,16 +75,28 @@ settings 11, admin 7. `tbmcp tools --toolsets all` prints the live list.
 
 | Tool | Bridge method | Notes |
 | --- | --- | --- |
-| `mail_send` | `compose.send` | **draft by default**; `mode=draft\|send\|later`; gated, `OUTBOUND` |
-| `mail_reply` | `compose.reply` | `reply_all`, quoting honoured |
-| `mail_forward` | `compose.forward` | inline or attached |
+| `mail_send` | `compose.send` for an unkeyed draft; otherwise `daemon.operations.submit` | **draft by default**; `mode=draft\|send\|later`; gated, `OUTBOUND` |
+| `mail_reply` | `compose.reply` for an unkeyed draft; otherwise `daemon.operations.submit` | `reply_all`, quoting honoured |
+| `mail_forward` | `compose.forward` for an unkeyed draft; otherwise `daemon.operations.submit` | inline or attached |
 | `mail_draft_save` | `compose.save` | draft or template |
 | `mail_compose_open` | `compose.open` | opens a window for the user to finish |
 | `mail_send_status` | `compose.status` | outbox / send-later queue |
+| `mail_draft_get` | `daemon.drafts.get` → `compose.draftGet` | saved draft, persistent reference and content revision |
+| `mail_draft_update` | `daemon.operations.submit` → `compose.draftUpdate` | expected revision + request key; preserves identity/format |
+| `mail_draft_send` | `daemon.operations.submit` → `compose.draftSend` | gated; expected revision + request key; send or Outbox |
 
 `compose.send` uses `messages.sendMessage`, which sends without opening a compose
 window, and falls back to `compose.beginNew` + `sendMessage(tabId)` when that is
 unavailable. HTML bodies are supported; pass `is_html`.
+
+Continuing a saved draft uses its native editor, not a reconstructed fresh message.
+Pass the returned `draftRef` and `revision` as `draft_ref` and `expected_revision`; a changed revision,
+another open editor or an unsupported/protected MIME structure prevents mutation.
+On the 128 ESR branch native edits and sends require 128.4.3 or newer; see the
+[version matrix](VALIDATION-1.4.md).
+Send/later operations report their observed status. A timeout or `unknown` status
+does not mean sent, and `queued` means Outbox placement rather than delivery.
+Inspect the operation instead of repeating a send under a new request key.
 
 `messages.sendMessage` needs the `messages.send` permission, which Thunderbird
 declares `OptionalOnlyPermission` — unrequestable from the manifest, grantable only
@@ -81,13 +109,20 @@ it to itself at startup; the add-on's startup report shows the outcome as
 
 | Tool | Bridge method | Notes |
 | --- | --- | --- |
-| `search_global` | `x.gloda.search` | Gloda ranked search, with contact/conversation facets |
-| `search_conversation` | `x.gloda.conversation` | the whole thread for a message |
+| `search_global` | `search.global` → `x.gloda.search` | ranked indexed-only search with stable snapshot pages |
+| `search_conversation` | `search.conversation` → `x.gloda.conversation` | bounded indexed thread, oldest first, with snapshot pages |
 | `search_index_status` | `x.gloda.stats` | whether the global index is on and how far along — the answer to "why did search find nothing" |
 | `search_saved_list` | `x.vfolders.list` | saved searches (virtual folders) |
 | `search_saved_create` | `x.vfolders.create` (gated) | |
 | `search_saved_update` | `x.vfolders.update` (gated) | |
 | `search_saved_delete` | `x.vfolders.delete` (gated, destructive) | |
+
+Snapshot cursors expire after five minutes or an add-on reload; their shared store
+holds at most 16 snapshots / 32 MiB and 1,000 rows per snapshot. Repeated cursor reads
+are stable. Coverage and truncation are explicit; a suggested literal-subject
+alternative is never run automatically. With a 1.3 add-on, requests without cursors
+retain the old `x.gloda.*` path and explicitly report live, non-snapshot pagination.
+New cursor and follow-up features require the corresponding advertised capability.
 
 ## contacts — opt-in
 
@@ -163,21 +198,28 @@ denylist, because that is the only layer with real privilege.
 | --- | --- | --- |
 | `tb_status` | `daemon.status` | is Thunderbird attached, which halves loaded |
 | `tb_wait` | `daemon.waitForThunderbird` | block until it connects |
-| `tb_events` | `daemon.events` | drain the event buffer (new mail, folder changes) |
+| `tb_events` | `daemon.events` | non-consuming event pages; session cursor, gap and resync metadata |
 | `tb_diagnostics` | `x.admin.diagnostics` | versions, profile, module availability |
 | `tb_console` | `x.admin.consoleMessages` | recent error-console lines, for debugging |
 | `tb_addons` | `x.admin.addons` | installed add-ons |
 | `tb_restart` | `x.admin.restart` | gated, interactive |
+| `tb_operation_status` | `daemon.operations.status` | item results; read-only receipt/hash reconciliation |
+| `tb_operation_list` | `daemon.operations.list` | this profile's seven-day operation history |
+| `tb_operation_cancel` | `daemon.operations.cancel` | stop unstarted work; dispatched send cannot be recalled |
 
-`tb_status`, `tb_wait` and `tb_events` are daemon-local: they answer even when
-Thunderbird is closed, which is what makes a clear error possible instead of a hang.
+Status, event and operation-history queries are daemon-local and remain available
+when Thunderbird is closed. `tb_wait` deliberately waits for a connection. Operation
+status may reconcile an uncertain receipt when Thunderbird is connected, but never
+repeats the mutation. The operation tools are also registered for mail/compose-only
+clients; read-only mode omits cancellation and all other mutation tools.
 
 ## Conventions every tool follows
 
 - Return a dict. `_common.page()` for lists, `_common.changed()` for writes,
   `_common.dry_run()` when `dry_run_only=True`.
-- Mutating tools: `confirm: bool = False`, `consent: Gate("…") = None`,
-  `guard_write("…")` first, `require(consent, "…")` before the write.
+- Gated mutations: `confirm: bool = False`, `consent: Gate("…") = None`,
+  `guard_write("…")` first, `require(consent, "…")` before the write. Ungated local
+  edits/cancellation still use `guard_write` and disappear in read-only mode.
 - `Gate(...)` params never appear in the input schema, so the model cannot forge
   approval; `confirm=true` is the cross-client escape hatch for hosts without
   elicitation (Codex).

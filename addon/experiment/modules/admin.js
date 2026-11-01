@@ -91,6 +91,8 @@ TBX_MODULE_NAMES.push("admin");
    *  the build flags and is what diagnostics embeds. */
   function appInfo() {
     return {
+      ...(H.processIdentity ? H.processIdentity() : {}),
+      draftEditorSupported: typeof tbxDraftEditorSupported === "function" && tbxDraftEditorSupported(),
       name: Services.appinfo.name,
       version: Services.appinfo.version,
       buildID: Services.appinfo.appBuildID,

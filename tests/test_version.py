@@ -9,7 +9,7 @@ import tomllib
 from tbmcp import bootstrap, server
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-EXPECTED = "1.3.0"
+EXPECTED = "1.4.0"
 
 
 def _pyproject_version() -> str:

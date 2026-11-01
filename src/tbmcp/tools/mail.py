@@ -71,8 +71,8 @@ def register(reg: Registrar) -> None:
         of already-indexed messages; `subject`/`author`/`body` are substring matches
         evaluated per folder. Dates are ISO-8601. Results are summaries — call
         `mail_get` for a body. Continue with `cursor=nextCursor`. A first page
-        carries `scope` — the folder and account ids the query covered — so an empty
-        result can be read against what was actually searched.
+        carries requestedScope and coverage. Requested folders are not proof that
+        every message body is available or indexed.
         """
         query: dict[str, Any] = {}
         if full_text:
@@ -141,6 +141,21 @@ def register(reg: Registrar) -> None:
         reported = {
             key: result[key] for key in ("scope", "indexNote") if result.get(key) is not None
         }
+        reported.update(
+            engine="global_index" if full_text else "folder_query",
+            requestedScope={
+                k: v
+                for k, v in query.items()
+                if k in {"folderId", "accountId", "fromDate", "toDate", "includeSubFolders"}
+            },
+            coverage="indexed_only"
+            if full_text
+            else ("body_availability_unknown" if body else "local_headers"),
+            partialReasons=["index_coverage_unknown"]
+            if full_text
+            else (["body_availability_unknown"] if body else []),
+            hasMore=bool(result.get("cursor")),
+        )
         return page(
             [message_summary(m) for m in result.get("messages", [])],
             cursor=result.get("cursor"),
