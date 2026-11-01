@@ -119,6 +119,19 @@ def _runnable(path: Path) -> bool:
         return False
 
 
+def _interpreter() -> Path:
+    """This interpreter, as a client has to spawn it.
+
+    Never `.resolve()`d outside Windows: a POSIX venv's `bin/python` is a symlink to
+    the base interpreter, and resolving it steps out of the venv. The registered
+    command then starts a Python without tbmcp installed, and the client only ever
+    reports the server's connection as closed. A Windows venv holds a real
+    python.exe, so resolving there changes nothing it relies on.
+    """
+    path = Path(sys.executable)
+    return path.resolve() if sys.platform == "win32" else path.absolute()
+
+
 def _console_script() -> Path | None:
     """Absolute path to the installed `thunderbird-mcp` launcher, if there is one.
 
@@ -132,7 +145,7 @@ def _console_script() -> Path | None:
         candidates.append(Path(found))
     # A venv or `uv tool` install is frequently not on the PATH of the shell that
     # happens to be running setup, so look beside the interpreter too.
-    here = Path(sys.executable).resolve().parent
+    here = _interpreter().parent
     candidates += [
         here / "thunderbird-mcp.exe",
         here / "thunderbird-mcp",
@@ -180,7 +193,7 @@ def server_command(settings: Settings) -> tuple[str, list[str]]:
     serve = _serve_args(settings)
     if script is not None:
         return str(script), serve
-    return str(Path(sys.executable).resolve()), ["-m", "tbmcp", *serve]
+    return str(_interpreter()), ["-m", "tbmcp", *serve]
 
 
 def _entry_for(client: str, command: str, args: Sequence[str]) -> dict[str, Any]:

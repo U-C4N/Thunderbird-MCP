@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import os
 import pathlib
-import sys
 
 import pytest
 
@@ -52,7 +51,7 @@ def test_server_command_falls_back_to_module(monkeypatch):
     monkeypatch.setattr(clients, "_console_script", lambda: None)
     command, args = clients.server_command(Settings())
     assert args[:2] == ["-m", "tbmcp"]
-    assert command == str(pathlib.Path(sys.executable).resolve())
+    assert command == str(clients._interpreter())
 
 
 def test_console_script_returns_none_when_all_unrunnable(monkeypatch, tmp_path):
@@ -95,3 +94,26 @@ def test_console_script_skips_unrunnable_candidate(monkeypatch, tmp_path):
     # Must be the second candidate (here/"thunderbird-mcp"), not the first (here/"thunderbird-mcp.exe")
     # Only true if the guard skips the unrunnable .exe and continues to check the next candidate
     assert result.name == "thunderbird-mcp"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX venvs symlink their interpreter")
+def test_a_symlinked_venv_interpreter_is_not_followed_out_of_the_venv(monkeypatch, tmp_path):
+    """Resolving venv/bin/python landed on /usr/bin/python3.13, which has no tbmcp:
+    Claude Code then reported the server as "Connection closed" on every start."""
+    base = tmp_path / "base-python"
+    base.write_bytes(b"")
+    bin_dir = tmp_path / "venv" / "bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "python").symlink_to(base)
+    script = bin_dir / "thunderbird-mcp"
+    script.write_text("#!/bin/sh\n")
+
+    monkeypatch.setattr(clients.sys, "executable", str(bin_dir / "python"))
+    monkeypatch.setattr(clients.sys, "platform", "linux")
+    monkeypatch.setattr(clients.shutil, "which", lambda name: None)
+    monkeypatch.setattr(clients, "_runnable", lambda path: True)
+    assert clients._console_script() == script
+
+    monkeypatch.setattr(clients, "_console_script", lambda: None)
+    command, _args = clients.server_command(Settings())
+    assert command == str(bin_dir / "python")
