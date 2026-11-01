@@ -223,6 +223,19 @@ def _stop(timeout: float = 60.0) -> bool:
                 os.kill(pid, 15)
             except OSError:
                 pass
+    return wait_closed(timeout)
+
+
+def wait_closed(timeout: float = 60.0) -> bool:
+    """Wait for a Thunderbird already asked to quit to finish on its own.
+
+    Call it after `Marionette.quit_application()`, which returns as soon as the quit
+    is acknowledged. Marionette resets the test preferences it applied (password
+    saving, safe browsing, add-on updates and remote settings all off, among about a
+    hundred) only at profile-before-change, near the very end of the shutdown. A
+    SIGTERM from `_stop()` landing before that skips the reset, and the test values
+    stay in the user's prefs.js for good.
+    """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if not is_running():
@@ -299,8 +312,10 @@ def _install_over_marionette(
             report = _report_from_status(client, identifier, report, restarting=restart_after)
     finally:
         # Always take Marionette back down: while it is listening, any local process
-        # can run privileged code inside Thunderbird.
+        # can run privileged code inside Thunderbird. Then let the quit finish before
+        # anything signals it, or its test preferences are never reset.
         client.quit_application()
+        wait_closed()
 
     if report.get("error"):
         return InstallOutcome(False, str(report["error"]), package, report)

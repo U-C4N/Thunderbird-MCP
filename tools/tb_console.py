@@ -19,7 +19,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 
 from tbmcp import marionette
 from tbmcp.addon_build import addon_id
-from tbmcp.addon_install import _launch, _stop, find_thunderbird
+from tbmcp.addon_install import _launch, _stop, find_thunderbird, wait_closed
 
 SCRIPT = r"""
 const pattern = arguments[0];
@@ -81,6 +81,7 @@ def main() -> int:
         report = client.execute(SCRIPT, [pattern, addon_id()], timeout_ms=60_000)
     finally:
         client.quit_application()
+        wait_closed()
 
     print(json.dumps(report, indent=2, ensure_ascii=False))
     _stop(timeout=30.0)
