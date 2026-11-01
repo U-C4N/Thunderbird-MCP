@@ -13,6 +13,8 @@ into an immediate, explainable refusal.
 # must evaluate at definition time so `Gate(...)` produces a real
 # `Annotated[Consent, Resolve(...)]` rather than a string the SDK has to re-evaluate.
 
+import os
+from pathlib import Path
 from typing import Any, Literal
 
 from ..errors import BlockedError, UsageError
@@ -27,6 +29,14 @@ from ..safety import (
 )
 from ..server import Registrar
 from ._common import call, changed, clamp, dry_run, one_of, page
+
+# Host paths from which agents may feed secret ASC into Thunderbird (read on
+# the host, then passed as armored text — Flatpak cannot see Source/).
+_SECRET_ASC_ALLOWLIST_PREFIXES = (
+    str(Path.home() / "Source" / "000-creds") + os.sep,
+    str(Path.home() / ".var" / "app" / "org.mozilla.thunderbird_esr" / ".thunderbird")
+    + os.sep,
+)
 
 # The curated intent → preference map behind `settings_describe`, kept as data so the
 # tool body stays readable and so a wrong entry is a one-line fix.
@@ -777,6 +787,77 @@ def register(reg: Registrar) -> None:
             total=result.get("totalAvailable"),
             secretKeysNote="Private key material is not exported.",
         )
+
+    @reg.read_tool(title="OpenPGP key details")
+    async def openpgp_get_key(key_id: str) -> dict[str, Any]:
+        """Metadata for one OpenPGP key (fingerprint / key id). Never returns secrets."""
+        return await call("x.openpgp.keyDetails", {"keyId": key_id}, timeout=60.0)
+
+    @reg.write_tool(title="Import OpenPGP secret ASC (allowlisted path)", annotations=IDEMPOTENT_WRITE)
+    async def openpgp_import_secret_asc(
+        path: str,
+        confirm: bool = False,
+        consent: Gate("import a private OpenPGP key into Thunderbird") = None,  # type: ignore[valid-type]
+        dry_run_only: bool = False,
+    ) -> dict[str, Any]:
+        """Import a private key from an allowlisted host path into Thunderbird.
+
+        Reads the ASC on the laptop host (so Flatpak need not see `000-creds`), then
+        asks the bridge to import it. Never exports secrets. Requires `confirm=true`.
+        Allowed prefixes: `~/Source/000-creds/` and the Thunderbird profile tree.
+
+        The bridge add-on must already expose `openpgp.importSecretKey` (reload the
+        add-on once after upgrading the fork — do not restart Thunderbird from an agent).
+        """
+        guard_write("import private OpenPGP keys")
+        require(consent, "import a private OpenPGP key")
+        if not confirm:
+            raise UsageError("Pass confirm=true to import a private key.")
+        resolved = str(Path(path).expanduser().resolve())
+        if not any(resolved.startswith(prefix) for prefix in _SECRET_ASC_ALLOWLIST_PREFIXES):
+            raise BlockedError(
+                f"path not allowlisted for secret import: {resolved}. "
+                "Use a file under ~/Source/000-creds/ or the Thunderbird profile."
+            )
+        if not Path(resolved).is_file():
+            raise UsageError(f"no such file: {resolved}")
+        armored = Path(resolved).read_text(encoding="utf-8")
+        if "BEGIN PGP PRIVATE KEY BLOCK" not in armored:
+            raise UsageError("file does not contain a PGP PRIVATE KEY BLOCK")
+        if dry_run_only:
+            return dry_run(
+                "openpgp.importSecretKey",
+                {"path": resolved, "bytes": len(armored), "confirm": True},
+            )
+        return await call(
+            "x.openpgp.importSecretKey",
+            {"armored": armored, "confirm": True},
+            timeout=120.0,
+        )
+
+    @reg.write_tool(title="Bind OpenPGP key to identity", annotations=IDEMPOTENT_WRITE)
+    async def openpgp_bind_identity(
+        identity_key: str,
+        openpgp_key_id: str,
+        confirm: bool = False,
+        consent: Gate("bind an OpenPGP key to a sending identity") = None,  # type: ignore[valid-type]
+        sign_mail: bool = True,
+        dry_run_only: bool = False,
+    ) -> dict[str, Any]:
+        """Set an identity's OpenPGP key id and signing default (no UI window)."""
+        guard_write("bind OpenPGP keys to identities")
+        require(consent, "bind an OpenPGP key to an identity")
+        if not confirm:
+            raise UsageError("Pass confirm=true to bind an OpenPGP key.")
+        payload = {
+            "identityKey": identity_key,
+            "openPgpKeyId": openpgp_key_id,
+            "signMail": sign_mail,
+            "e2etechpref": 2,
+        }
+        if dry_run_only:
+            return dry_run("identities.setEncryption", payload)
+        return await call("x.identities.setEncryption", payload, timeout=30.0)
 
 
 # -------------------------------------------------------------------------- helpers

@@ -292,6 +292,111 @@ TBX_MODULE_NAMES.push("openpgp");
     };
   };
 
+  /**
+   * Estate fork: import a secret key from an ASCII-armoured block already read
+   * on the host (Python allowlists the path). Never export secrets. Requires
+   * confirm=true. Sets personal acceptance for each UID email when possible.
+   */
+  TBX_MODULES["openpgp.importSecretKey"] = async (params) => {
+    if (!params.confirm) {
+      throw H.usage(
+        "importSecretKey requires confirm=true — this adds a private key to the " +
+          "Thunderbird profile keyring"
+      );
+    }
+    const armored = String(H.need(params, "armored"));
+    if (!/BEGIN PGP PRIVATE KEY BLOCK/i.test(armored)) {
+      throw H.usage(
+        "armored must be an ASCII-armoured private key block " +
+          "(-----BEGIN PGP PRIVATE KEY BLOCK-----)"
+      );
+    }
+
+    const keyring = ring();
+    const before = new Set(allKeys().map((key) => String(key.fpr || "").toLowerCase()));
+    const errorObj = {};
+    const importedObj = {};
+    let exitCode = 0;
+    if (typeof keyring.importKeyAsync === "function") {
+      exitCode = await keyring.importKeyAsync(
+        null,
+        false,
+        armored,
+        false,
+        null,
+        errorObj,
+        importedObj
+      );
+    } else if (typeof keyring.importKeyDataSilent === "function") {
+      await keyring.importKeyDataSilent(null, armored, false);
+    } else {
+      throw H.unsupported(
+        "this build's EnigmailKeyRing exposes no import entry point this bridge knows"
+      );
+    }
+    if (exitCode) {
+      throw new Error(errorObj.value || `secret key import failed (code ${exitCode})`);
+    }
+
+    // Reload so secretAvailable / acceptance see the new material.
+    if (typeof keyring.clearCache === "function") {
+      keyring.clearCache();
+    }
+
+    const after = allKeys();
+    const added = after.filter((key) => !before.has(String(key.fpr || "").toLowerCase()));
+    const touched =
+      added.length > 0
+        ? added
+        : after.filter((key) => Boolean(key.secretAvailable));
+
+    const acceptance = [];
+    let db = null;
+    try {
+      db = ChromeUtils.importESModule(
+        "chrome://openpgp/content/modules/sqliteDb.sys.mjs"
+      ).PgpSqliteDb2;
+    } catch (ex) {
+      db = null;
+    }
+    for (const key of touched) {
+      const fpr = String(key.fpr || "");
+      if (!fpr || !key.secretAvailable) {
+        continue;
+      }
+      const emails = (key.userIds || [])
+        .map((uid) => {
+          const m = String(uid.userId || "").match(/<([^>]+)>/);
+          return m ? m[1].toLowerCase() : null;
+        })
+        .filter(Boolean);
+      if (db && typeof db.updateAcceptance === "function") {
+        try {
+          await db.updateAcceptance(fpr, emails, "personal");
+          acceptance.push({ fingerprint: fpr, emails, decision: "personal" });
+        } catch (ex) {
+          acceptance.push({
+            fingerprint: fpr,
+            emails,
+            error: String(ex.message || ex),
+          });
+        }
+      }
+    }
+
+    return {
+      imported: added.length,
+      keys: touched.map(summarise),
+      alreadyPresent: added.length === 0,
+      total: after.length,
+      acceptance,
+      secretExported: false,
+      note:
+        "Secret key material was imported into this profile only. This bridge " +
+        "still refuses to export private keys.",
+    };
+  };
+
   TBX_MODULES["openpgp.exportKey"] = async (params) => {
     const kind = String(params.kind || params.type || "public").toLowerCase();
     if (params.secret === true || params.includeSecret === true || kind === "secret" || kind === "private") {

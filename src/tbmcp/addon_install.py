@@ -132,16 +132,64 @@ def find_thunderbird() -> pathlib.Path | None:
             pathlib.Path.home() / "Applications/Thunderbird.app/Contents/MacOS/thunderbird",
         ]
     else:
+        home = pathlib.Path.home()
+        flatpak_exports = home / ".local" / "share" / "flatpak" / "exports" / "bin"
         candidates = [
             pathlib.Path("/usr/bin/thunderbird"),
             pathlib.Path("/usr/local/bin/thunderbird"),
             pathlib.Path("/snap/bin/thunderbird"),
+            # Flatpak (stable + ESR). Export wrappers pass argv through to
+            # `flatpak run`, which is what install-addon / restart need.
+            flatpak_exports / "org.mozilla.thunderbird_esr",
+            flatpak_exports / "org.mozilla.Thunderbird",
+            pathlib.Path("/var/lib/flatpak/exports/bin/org.mozilla.thunderbird_esr"),
+            pathlib.Path("/var/lib/flatpak/exports/bin/org.mozilla.Thunderbird"),
         ]
     for path in candidates:
         if path and path.is_file():
             return path
     found = shutil.which("thunderbird")
     return pathlib.Path(found) if found else None
+
+
+def _flatpak_guest_profile(profile: ThunderbirdProfile | None) -> pathlib.Path | None:
+    """Host Flatpak profile → path Thunderbird sees inside the sandbox.
+
+    Host:  ~/.var/app/org.mozilla.thunderbird_esr/.thunderbird/<name>
+    Guest: ~/.thunderbird/<name>  (Flatpak persistent=.thunderbird bind)
+    """
+    if profile is None:
+        return None
+    parts = profile.path.parts
+    try:
+        var_idx = parts.index(".var")
+        if parts[var_idx + 1] == "app" and parts[var_idx + 3] == ".thunderbird":
+            return pathlib.Path.home() / ".thunderbird" / parts[var_idx + 4]
+    except (ValueError, IndexError):
+        return None
+    return None
+
+
+def _flatpak_profile_arg(exe: pathlib.Path, profile: ThunderbirdProfile | None) -> list[str]:
+    guest = _flatpak_guest_profile(profile)
+    if guest is not None:
+        return ["-profile", str(guest)]
+    if profile is None:
+        return []
+    return ["-profile", str(profile.path)]
+
+
+def _stage_xpi_for_thunderbird(
+    package: pathlib.Path, profile: ThunderbirdProfile | None
+) -> pathlib.Path:
+    """Return an XPI path Thunderbird can open (Flatpak cannot see ~/.local/state)."""
+    guest = _flatpak_guest_profile(profile)
+    if guest is None or profile is None:
+        return package
+    # Stage next to the profile on the host; Flatpak sees it under ~/.thunderbird/.
+    staged_host = profile.path / package.name
+    shutil.copy2(package, staged_host)
+    return guest / package.name
 
 
 def running_pids() -> list[int]:
@@ -161,10 +209,27 @@ def running_pids() -> list[int]:
                 if len(parts) >= 2 and parts[1].isdigit():
                     pids.append(int(parts[1]))
             return pids
-        out = subprocess.run(
-            ["pgrep", "-f", "thunderbird"], capture_output=True, text=True, check=False
-        ).stdout
-        return [int(line) for line in out.split() if line.isdigit()]
+        # Do not use a bare `thunderbird` substring: Flatpak profile paths
+        # contain `thunderbird_esr`, so `pgrep -f thunderbird` also matches the
+        # install-addon process itself and can terminate the installer.
+        patterns = (
+            r"/app/lib/thunderbird/thunderbird",
+            r"org\.mozilla\.thunderbird",
+            r"[\\/]thunderbird(\.exe)?( |$)",
+        )
+        pids: list[int] = []
+        seen: set[int] = set()
+        for pattern in patterns:
+            out = subprocess.run(
+                ["pgrep", "-f", pattern], capture_output=True, text=True, check=False
+            ).stdout
+            for line in out.split():
+                if line.isdigit():
+                    pid = int(line)
+                    if pid not in seen and pid != os.getpid():
+                        seen.add(pid)
+                        pids.append(pid)
+        return pids
     except (OSError, ValueError):
         return []
 
@@ -174,9 +239,7 @@ def is_running() -> bool:
 
 
 def _launch(exe: pathlib.Path, extra_args: list[str], profile: ThunderbirdProfile | None) -> None:
-    argv = [str(exe), *extra_args]
-    if profile is not None:
-        argv += ["-profile", str(profile.path)]
+    argv = [str(exe), *extra_args, *_flatpak_profile_arg(exe, profile)]
     # All three streams, not just stdin. Thunderbird outlives us on purpose, so an
     # inherited stdout keeps the caller's pipe open long after `install-addon` has
     # finished — an agent or CI step capturing our output waits for the mail client
@@ -201,6 +264,10 @@ def _launch(exe: pathlib.Path, extra_args: list[str], profile: ThunderbirdProfil
         kwargs["creationflags"] = 0x00000008 | 0x00000200  # DETACHED | NEW_GROUP
     else:
         kwargs["start_new_session"] = True
+    # Flatpak export wrappers need DISPLAY for GUI Thunderbird; inherit the
+    # caller's env so Marionette installs work from headless agent sessions
+    # that already exported DISPLAY=:0.
+    kwargs["env"] = os.environ.copy()
     subprocess.Popen(argv, **kwargs)
 
 
@@ -240,7 +307,19 @@ def install_automatic(
     restart_after: bool = True,
     xpi: pathlib.Path | None = None,
 ) -> InstallOutcome:
-    """Build and install through Marionette, then relaunch Thunderbird normally."""
+    """Build and install through Marionette, then relaunch Thunderbird normally.
+
+    Estate hard rule: this closes and restarts Thunderbird and steals focus.
+    Agents must use `--manual` (or set TBMCP_ALLOW_TB_RESTART=1) instead of
+    calling this path from unattended MCP work.
+    """
+    if os.environ.get("TBMCP_ALLOW_TB_RESTART") not in ("1", "true", "yes"):
+        raise UnsupportedError(
+            "refusing automatic install-addon: it restarts Thunderbird and steals "
+            "desktop focus. Use `tbmcp install-addon --manual`, or set "
+            "TBMCP_ALLOW_TB_RESTART=1 only when the founder explicitly asked for a "
+            "Thunderbird restart."
+        )
     exe = find_thunderbird()
     if exe is None:
         raise UnsupportedError(
@@ -249,6 +328,9 @@ def install_automatic(
         )
     package = xpi or build_xpi(state_dir() / "addon")
     identifier = addon_id()
+    # Marionette runs inside Thunderbird's sandbox; stage the XPI where that
+    # process can read it (profile dir for Flatpak ESR).
+    package_for_tb = _stage_xpi_for_thunderbird(package, profile)
 
     was_running = is_running()
     if was_running and not _stop():
@@ -267,10 +349,17 @@ def install_automatic(
     # install script's reply was lost, and Thunderbird stayed down.
     try:
         return _install_over_marionette(
-            exe, profile, package, identifier, restart_after=restart_after
+            exe, profile, package_for_tb, identifier, restart_after=restart_after
         )
     finally:
         _restart_plain(exe, profile, restart_after)
+        # Drop the staged copy; the AddonManager keeps its own install.
+        if package_for_tb != package and profile is not None:
+            staged_host = profile.path / package.name
+            try:
+                staged_host.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _install_over_marionette(

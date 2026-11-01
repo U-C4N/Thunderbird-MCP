@@ -83,6 +83,8 @@ def candidate_roots() -> list[Path]:
         # Snap and Flatpak relocate the whole tree.
         home / "snap" / "thunderbird" / "common" / ".thunderbird",
         home / ".var" / "app" / "org.mozilla.Thunderbird" / ".thunderbird",
+        # Flathub ESR package id (lowercase) — estate laptop default.
+        home / ".var" / "app" / "org.mozilla.thunderbird_esr" / ".thunderbird",
     ]
 
 
