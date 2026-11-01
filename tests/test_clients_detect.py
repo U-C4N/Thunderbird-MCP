@@ -8,6 +8,9 @@ failure points at the one path or CLI check that is wrong.
 
 from __future__ import annotations
 
+import os
+import stat
+
 import pytest
 
 from tbmcp import clients
@@ -89,3 +92,14 @@ def test_result_order_follows_clients_tuple_not_discovery_order(monkeypatch, tmp
         clients.shutil, "which", lambda name: "/bin/codex" if name == "codex" else None
     )
     assert clients.installed_clients() == ["codex", "zed"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+def test_rewriting_a_private_config_keeps_it_private(tmp_path):
+    """claude_desktop_config.json is kept at 0600; the temp file the rewrite goes
+    through was born 0664 and the replace handed that mode to the config."""
+    config = tmp_path / "claude_desktop_config.json"
+    config.write_text("{}", encoding="utf-8")
+    config.chmod(0o600)
+    clients._write(config, '{"mcpServers": {}}')
+    assert stat.S_IMODE(config.stat().st_mode) == 0o600

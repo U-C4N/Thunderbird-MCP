@@ -289,6 +289,10 @@ def _write(path: Path, text: str) -> Path | None:
         tmp = path.with_name(f"{path.name}.tbmcp-tmp")
         with open(tmp, "w", encoding="utf-8", newline="\n") as handle:
             handle.write(text)
+        # The temp file is born with the umask's mode (often 0664), and the replace
+        # would hand that to a config the app keeps at 0600.
+        if path.exists():
+            shutil.copymode(path, tmp)
         os.replace(tmp, path)
     except OSError as exc:
         raise SetupError(f"could not write {path}: {exc}") from exc
