@@ -10,6 +10,7 @@ return envelope.
 # must evaluate at definition time so `Gate(...)` produces a real
 # `Annotated[Consent, Resolve(...)]` rather than a string the SDK has to re-evaluate.
 
+import datetime as _dt
 from typing import Any, Literal
 
 from ..errors import UsageError
@@ -35,6 +36,14 @@ from ._common import (
     require_ids,
     trim,
 )
+
+
+def _with_offset(iso: str | None) -> str | None:
+    """Give a naive ISO datetime the local UTC offset; leave aware ones alone."""
+    if not iso:
+        return iso
+    parsed = _dt.datetime.fromisoformat(iso)
+    return (parsed if parsed.tzinfo else parsed.astimezone()).isoformat()
 
 
 def register(reg: Registrar) -> None:
@@ -106,8 +115,10 @@ def register(reg: Registrar) -> None:
                 "tags": dict.fromkeys(tags, True),
                 "mode": one_of(tag_mode, ("all", "any", "none"), field="tag_mode", default="any"),
             }
-        start = coerce_date(from_date, field="from_date")
-        end = coerce_date(to_date, field="to_date")
+        # messages.query's "date" format rejects a time without an offset,
+        # so a naive value is pinned to this machine's local zone.
+        start = _with_offset(coerce_date(from_date, field="from_date"))
+        end = _with_offset(coerce_date(to_date, field="to_date"))
         if start:
             query["fromDate"] = start
         if end:

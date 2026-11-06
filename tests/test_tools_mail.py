@@ -7,6 +7,8 @@ by calling the tool functions directly.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from mcp import Client
 
@@ -62,6 +64,8 @@ async def test_search_maps_arguments_onto_the_query(fake_bridge) -> None:
     assert params["query"]["fullText"] == "invoice"
     assert params["query"]["unread"] is True
     assert params["query"]["fromDate"].startswith("2026-07-01")
+    # messages.query rejects a datetime without an offset (seen live: "2026-01-01T00:00:00").
+    assert re.search(r"(Z|[+-]\d{2}:\d{2})$", params["query"]["fromDate"])
     assert params["limit"] == 5
 
     payload = result.structured_content
