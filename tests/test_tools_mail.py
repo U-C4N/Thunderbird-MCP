@@ -172,6 +172,34 @@ async def test_mark_is_not_gated(fake_bridge) -> None:
     assert bridge.params_for("messages.mark")["read"] is True
 
 
+async def test_save_attachment_without_confirmation_is_refused(fake_bridge) -> None:
+    """The sender chooses the bytes and the model the path: unconfirmed, a mail could
+    have its attachment dropped into a startup folder."""
+    bridge = fake_bridge()
+    async with Client(_server(bridge)) as client:
+        result = await client.call_tool(
+            "mail_save_attachment",
+            {"message_id": 42, "part_name": "1.2", "directory": "/home/me/.config/autostart"},
+        )
+    assert result.is_error
+    assert "confirm=true" in _text(result)
+    assert "messages.saveAttachment" not in bridge.methods(), "it wrote the file anyway"
+
+
+async def test_save_attachment_with_confirmation_goes_through(fake_bridge) -> None:
+    bridge = fake_bridge(
+        {"messages.saveAttachment": {"path": "/home/me/invoice.pdf", "bytes": 1024}}
+    )
+    async with Client(_server(bridge)) as client:
+        result = await client.call_tool(
+            "mail_save_attachment",
+            {"message_id": 42, "part_name": "1.2", "directory": "/home/me", "confirm": True},
+        )
+    assert not result.is_error, _text(result)
+    assert bridge.params_for("messages.saveAttachment")["directory"] == "/home/me"
+    assert result.structured_content["saved"] is True
+
+
 async def test_empty_id_list_is_rejected(fake_bridge) -> None:
     bridge = fake_bridge()
     async with Client(_server(bridge)) as client:
