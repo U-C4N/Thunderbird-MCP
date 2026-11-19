@@ -336,11 +336,15 @@ and names the broken one with the command that fixes it.
 
 `TBMCP_DEBUG=1` logs verbosely to stderr; `TBMCP_STATE_DIR` moves the daemon's
 files; `tb_console` returns the add-on's `[tbmcp]` lines as a tool.
+`TBMCP_THUNDERBIRD` pins the executable `install-addon` starts, `TBMCP_PROFILE` pins
+the profile — both for a build the search below picks wrong.
 
 ## Requirements
 
 Thunderbird 128 or newer (verified on 155), Python 3.11–3.14, Windows, macOS or Linux
-including Snap and Flatpak Thunderbird.
+including Snap and Flatpak Thunderbird. Betterbird is found too: a Flatpak install is
+located at `~/.var/app/<app-id>`, scanned for its profile and started through its
+`flatpak` wrapper, so `-marionette` still reaches the sandbox.
 
 ## Development
 

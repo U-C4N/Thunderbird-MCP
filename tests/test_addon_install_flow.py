@@ -139,6 +139,20 @@ def test_a_normal_success_restarts_once(flow):
     assert calls["restart"] == 1
 
 
+def test_an_executable_that_will_not_start_still_restarts_thunderbird(flow, monkeypatch):
+    calls = flow(FakeClient(install_report={"result": {"ok": True}}))
+
+    def refuse(exe, extra_args, profile):
+        raise OSError("Exec format error")
+
+    monkeypatch.setattr(addon_install, "_launch", refuse)
+
+    with pytest.raises(OSError):
+        addon_install.install_automatic()
+
+    assert calls["restart"] == 1
+
+
 def test_the_failure_text_does_not_claim_a_restart_that_no_restart_prevented(flow):
     client = FakeClient(
         install_report=None,
