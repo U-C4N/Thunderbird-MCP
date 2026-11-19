@@ -107,64 +107,169 @@ class InstallOutcome:
 
 # ------------------------------------------------------------------- executable
 
+FLATPAK_APPS = (
+    "eu.betterbird.Betterbird",
+    "org.mozilla.Thunderbird",
+    "org.mozilla.thunderbird_esr",
+)
+"""Flatpak app ids we can start. Betterbird comes first: it is Thunderbird renamed,
+and a machine may well have both installed while only one is the user's mail client.
+`TBMCP_THUNDERBIRD` decides that tie; this order only matters without it."""
+
+IMAGE_NAMES = ("thunderbird.exe", "betterbird.exe")
+
+NATIVE_DIRS = (pathlib.Path("/usr/bin"), pathlib.Path("/usr/local/bin"), pathlib.Path("/snap/bin"))
+"""Where a distribution build, a Snap build or a hand-installed build puts the binary."""
+
+
+def _flatpak_exports(app: str) -> list[pathlib.Path]:
+    """The two places `flatpak run` leaves its executable wrapper."""
+    return [
+        pathlib.Path("/var/lib/flatpak/exports/bin") / app,
+        pathlib.Path.home() / ".local/share/flatpak/exports/bin" / app,
+    ]
+
 
 def find_thunderbird() -> pathlib.Path | None:
-    """Locate the Thunderbird binary for this platform."""
+    """Locate the Thunderbird (or Betterbird) binary for this platform."""
     override = os.environ.get("TBMCP_THUNDERBIRD")
-    if override and pathlib.Path(override).exists():
-        return pathlib.Path(override)
+    if override:
+        path = pathlib.Path(override).expanduser()
+        # Falling back silently here would hide a typo behind a different build.
+        if path.exists():
+            return path
+        log.warning("TBMCP_THUNDERBIRD=%s does not exist; searching anyway", override)
 
     if sys.platform == "win32":
+        program_files = [
+            pathlib.Path(os.environ.get("ProgramFiles", r"C:\Program Files")),
+            pathlib.Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")),
+            pathlib.Path(os.environ.get("LOCALAPPDATA", "")),
+        ]
         candidates = [
-            pathlib.Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
-            / "Mozilla Thunderbird"
-            / "thunderbird.exe",
-            pathlib.Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"))
-            / "Mozilla Thunderbird"
-            / "thunderbird.exe",
-            pathlib.Path(os.environ.get("LOCALAPPDATA", ""))
-            / "Mozilla Thunderbird"
-            / "thunderbird.exe",
+            base / product / image
+            for base in program_files
+            for product in ("Mozilla Thunderbird", "Betterbird")
+            for image in ("thunderbird.exe", "betterbird.exe")
         ]
     elif sys.platform == "darwin":
         candidates = [
-            pathlib.Path("/Applications/Thunderbird.app/Contents/MacOS/thunderbird"),
-            pathlib.Path.home() / "Applications/Thunderbird.app/Contents/MacOS/thunderbird",
+            pathlib.Path("/Applications") / bundle / "Contents/MacOS" / binary
+            for bundle in ("Thunderbird.app", "Betterbird.app")
+            for binary in ("thunderbird", "betterbird")
+        ] + [
+            pathlib.Path.home() / "Applications" / bundle / "Contents/MacOS" / binary
+            for bundle in ("Thunderbird.app", "Betterbird.app")
+            for binary in ("thunderbird", "betterbird")
         ]
     else:
         candidates = [
-            pathlib.Path("/usr/bin/thunderbird"),
-            pathlib.Path("/usr/local/bin/thunderbird"),
-            pathlib.Path("/snap/bin/thunderbird"),
+            *[
+                directory / name
+                for directory in NATIVE_DIRS
+                for name in ("thunderbird", "betterbird")
+            ],
+            *[export for app in FLATPAK_APPS for export in _flatpak_exports(app)],
         ]
+
     for path in candidates:
         if path and path.is_file():
             return path
-    found = shutil.which("thunderbird")
-    return pathlib.Path(found) if found else None
+    for name in ("thunderbird", "betterbird"):
+        found = shutil.which(name)
+        if found:
+            return pathlib.Path(found)
+    return None
+
+
+def flatpak_app_id(exe: pathlib.Path | str) -> str | None:
+    """The Flatpak app id when `exe` is one of the export wrappers above."""
+    name = pathlib.Path(exe).name
+    return name if name in FLATPAK_APPS else None
+
+
+def _looks_like_flatpak(exe: pathlib.Path | str) -> bool:
+    return "flatpak" in str(exe)
+
+
+def _profile_argument(exe: pathlib.Path | str, profile: ThunderbirdProfile | None) -> str | None:
+    """`profile.path` as the process we are about to start will see it.
+
+    A Flatpak app does not see the host's `$HOME`. Its own data directory is mounted
+    *as* `$HOME` (same string, different content), so
+    `~/.var/app/<id>/.thunderbird/<name>` on the host is `~/.thunderbird/<name>` inside.
+    Passing the host path would make Thunderbird create a fresh profile in the
+    sandbox, install the add-on into that one, and lose it at the next start.
+    """
+    if profile is None:
+        return None
+    app = flatpak_app_id(exe)
+    if app is None:
+        if _looks_like_flatpak(exe):
+            log.warning(
+                "cannot tell which Flatpak app %s is, so -profile is not passed; "
+                "the app will open its default profile",
+                exe,
+            )
+            return None
+        return str(profile.path)
+    app_root = pathlib.Path.home() / ".var" / "app" / app
+    try:
+        inside = profile.path.relative_to(app_root)
+    except ValueError:
+        log.warning(
+            "profile %s is outside the Flatpak app's own directory, so it cannot be "
+            "reached from inside the sandbox; not passing -profile",
+            profile.path,
+        )
+        return None
+    return str(pathlib.Path.home() / inside)
+
+
+def _is_sandbox_wrapper(pid: int) -> bool:
+    """Whether `pid` is Flatpak's `bwrap` parent rather than the app itself.
+
+    Signalling the wrapper tears the sandbox down instead of letting the mail client
+    close itself, which is exactly what `_stop` must never do.
+    """
+    try:
+        return b"bwrap" in pathlib.Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return False
 
 
 def running_pids() -> list[int]:
-    """PIDs of running Thunderbird processes, best effort and dependency-free."""
+    """PIDs of a running Thunderbird, best effort and dependency-free.
+
+    Betterbird is Thunderbird renamed, and its Flatpak keeps the real binary as
+    `betterbird-bin`, so both names have to be matched — otherwise `is_running`
+    says "closed", `install-addon` relaunches over a live instance, and the
+    `-marionette` switch is ignored by the window that is already open.
+    """
     try:
         if sys.platform == "win32":
-            out = subprocess.run(
-                ["tasklist", "/FI", "IMAGENAME eq thunderbird.exe", "/NH", "/FO", "CSV"],
-                capture_output=True,
-                text=True,
-                check=False,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            ).stdout
             pids = []
-            for line in out.splitlines():
-                parts = [p.strip('" ') for p in line.split('","')]
-                if len(parts) >= 2 and parts[1].isdigit():
-                    pids.append(int(parts[1]))
+            for image in IMAGE_NAMES:
+                out = subprocess.run(
+                    ["tasklist", "/FI", f"IMAGENAME eq {image}", "/NH", "/FO", "CSV"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                ).stdout
+                for line in out.splitlines():
+                    parts = [p.strip('" ') for p in line.split('","')]
+                    if len(parts) >= 2 and parts[1].isdigit():
+                        pids.append(int(parts[1]))
             return pids
         out = subprocess.run(
-            ["pgrep", "-f", "thunderbird"], capture_output=True, text=True, check=False
+            ["pgrep", "-f", "thunderbird|betterbird"], capture_output=True, text=True, check=False
         ).stdout
-        return [int(line) for line in out.split() if line.isdigit()]
+        return [
+            pid
+            for pid in (int(line) for line in out.split() if line.isdigit())
+            if not _is_sandbox_wrapper(pid)
+        ]
     except (OSError, ValueError):
         return []
 
@@ -175,8 +280,9 @@ def is_running() -> bool:
 
 def _launch(exe: pathlib.Path, extra_args: list[str], profile: ThunderbirdProfile | None) -> None:
     argv = [str(exe), *extra_args]
-    if profile is not None:
-        argv += ["-profile", str(profile.path)]
+    profile_argument = _profile_argument(exe, profile)
+    if profile_argument is not None:
+        argv += ["-profile", profile_argument]
     # All three streams, not just stdin. Thunderbird outlives us on purpose, so an
     # inherited stdout keeps the caller's pipe open long after `install-addon` has
     # finished — an agent or CI step capturing our output waits for the mail client
@@ -244,7 +350,9 @@ def install_automatic(
     exe = find_thunderbird()
     if exe is None:
         raise UnsupportedError(
-            "could not find thunderbird.exe. Set TBMCP_THUNDERBIRD to its full path, "
+            "could not find a Thunderbird or Betterbird executable. Set "
+            "TBMCP_THUNDERBIRD to its full path (for a Flatpak build, the wrapper "
+            "under /var/lib/flatpak/exports/bin or ~/.local/share/flatpak/exports/bin), "
             "or use `tbmcp install-addon --manual`."
         )
     package = xpi or build_xpi(state_dir() / "addon")

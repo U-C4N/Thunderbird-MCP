@@ -66,13 +66,30 @@ class ThunderbirdProfile:
         return self.path / "calendar-data" / "local.sqlite"
 
 
+FLATPAK_APPS = (
+    "org.mozilla.Thunderbird",
+    "org.mozilla.thunderbird_esr",
+    "eu.betterbird.Betterbird",
+)
+"""Flatpak app ids that are Thunderbird or a Thunderbird build.
+
+Each one keeps its `profiles.ini` in `~/.var/app/<id>/.thunderbird`, because their
+manifests use `--persist=.thunderbird` — the sandbox sees the profile at
+`~/.thunderbird`, the host sees it here.
+"""
+
+
 def candidate_roots() -> list[Path]:
     """Every place a Thunderbird `profiles.ini` may live on this platform."""
     home = Path.home()
     if sys.platform == "win32":
         appdata = os.environ.get("APPDATA")
-        roots = [Path(appdata) / "Thunderbird"] if appdata else []
-        return [*roots, home / "AppData" / "Roaming" / "Thunderbird"]
+        roots = [Path(appdata) / name for name in ("Thunderbird", "Betterbird")] if appdata else []
+        return [
+            *[root for root in roots if root.is_dir()],
+            home / "AppData" / "Roaming" / "Thunderbird",
+            home / "AppData" / "Roaming" / "Betterbird",
+        ]
     if sys.platform == "darwin":
         return [
             home / "Library" / "Thunderbird",
@@ -80,9 +97,13 @@ def candidate_roots() -> list[Path]:
         ]
     return [
         home / ".thunderbird",
-        # Snap and Flatpak relocate the whole tree.
+        # Snap relocates the whole tree.
         home / "snap" / "thunderbird" / "common" / ".thunderbird",
-        home / ".var" / "app" / "org.mozilla.Thunderbird" / ".thunderbird",
+        home / "snap" / "betterbird" / "common" / ".thunderbird",
+        # Flatpak, including Betterbird, whose profile this is on a Betterbird-only machine.
+        *(home / ".var" / "app" / app / ".thunderbird" for app in FLATPAK_APPS),
+        # A Flatpak build we have not heard of still gets a chance before we give up.
+        *sorted((home / ".var" / "app").glob("*/.thunderbird")),
     ]
 
 
