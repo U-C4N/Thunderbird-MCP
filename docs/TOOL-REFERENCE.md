@@ -251,6 +251,9 @@ below it. Raise `depth` to walk further, or give a filter — `name` is a
 case-insensitive substring — and the whole tree is searched instead. Pass
 `tree=true` to get folders nested under `children` rather than flat.
 
+`parent_id` browses one folder's subtree: `depth` then counts the levels
+*below* that folder, and the folder itself is not returned.
+
 Counts come from Thunderbird's own folder database. On IMAP that database
 can lag until the folder has been selected once in Thunderbird, so treat
 unread and total counts as close rather than exact.

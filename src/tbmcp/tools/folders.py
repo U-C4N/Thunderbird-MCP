@@ -31,6 +31,36 @@ DEFAULT_DEPTH = 1
 MAX_DEPTH = 20
 
 
+def _split_folder_id(folder_id: str) -> tuple[str, str]:
+    """`account1://INBOX/sub` → `("account1", "/INBOX/sub")`."""
+    account, _, rest = folder_id.partition("://")
+    trimmed = rest.strip("/")
+    return account, f"/{trimmed}" if trimmed else "/"
+
+
+def _path_depth(path: str) -> int:
+    return len([part for part in path.split("/") if part])
+
+
+def _parent_path(path: str) -> str:
+    cut = path.rfind("/")
+    return path[:cut] if cut > 0 else "/"
+
+
+def _nest(folders: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Nest a flat list by path; a folder whose parent is absent stays at the top."""
+    by_key = {f"{folder.get('accountId')}{folder.get('path')}": folder for folder in folders}
+    roots: list[dict[str, Any]] = []
+    for folder in folders:
+        key = f"{folder.get('accountId')}{_parent_path(str(folder.get('path') or '/'))}"
+        parent = by_key.get(key)
+        if parent is not None and parent is not folder:
+            parent.setdefault("children", []).append(folder)
+        else:
+            roots.append(folder)
+    return roots
+
+
 def _slim(folder: dict[str, Any]) -> dict[str, Any]:
     """Drop the fields that carry no information, and recurse into `children`.
 
@@ -75,6 +105,9 @@ def register(reg: Registrar) -> None:
         case-insensitive substring — and the whole tree is searched instead. Pass
         `tree=true` to get folders nested under `children` rather than flat.
 
+        `parent_id` browses one folder's subtree: `depth` then counts the levels
+        *below* that folder, and the folder itself is not returned.
+
         Counts come from Thunderbird's own folder database. On IMAP that database
         can lag until the folder has been selected once in Thunderbird, so treat
         unread and total counts as close rather than exact.
@@ -84,9 +117,6 @@ def register(reg: Registrar) -> None:
             query["accountId"] = account_id
         if name:
             query["name"] = name
-        if parent_id:
-            query["folderId"] = parent_id
-            query["recursive"] = True
         if special_use:
             query["specialUse"] = [special_use]
         for key, value in (
@@ -100,21 +130,56 @@ def register(reg: Registrar) -> None:
             if value is not None:
                 query[key] = value
 
-        if depth is not None:
+        # `parent_id` cannot go into the query: `folders.query` accepts `folderId`
+        # (that folder alone) and rejects anything else it does not know — the
+        # previous `recursive: True` made every call fail schema validation. So ask
+        # for the account's tree down to the wanted level and keep the subtree.
+        parent_path: str | None = None
+        if parent_id:
+            parent_account, parent_path = _split_folder_id(parent_id)
+            if account_id and account_id != parent_account:
+                raise UsageError(
+                    f"parent_id belongs to account {parent_account}, not {account_id}.",
+                    hint="Pass one or the other, or matching values.",
+                )
+            query["accountId"] = parent_account
+            levels = clamp(
+                depth, default=DEFAULT_DEPTH, minimum=1, maximum=MAX_DEPTH, field="depth"
+            )
+            depth = clamp(
+                _path_depth(parent_path) + levels,
+                default=DEFAULT_DEPTH,
+                minimum=1,
+                maximum=MAX_DEPTH,
+                field="depth",
+            )
+        elif depth is not None:
             depth = clamp(depth, default=DEFAULT_DEPTH, minimum=0, maximum=MAX_DEPTH, field="depth")
         result = await call(
             "folders.query",
             {
                 "query": query,
                 "depth": depth,
-                "tree": tree,
+                "tree": tree and parent_path is None,
                 "includeCounts": include_counts,
                 "limit": clamp(limit, default=200, minimum=1, maximum=500, field="limit"),
             },
             timeout=90.0,
         )
+        folders = result.get("folders", [])
+        if parent_path is not None:
+            prefix = parent_path if parent_path.endswith("/") else parent_path + "/"
+            folders = [
+                folder
+                for folder in folders
+                if folder.get("accountId") == query["accountId"]
+                and str(folder.get("path") or "") != parent_path
+                and str(folder.get("path") or "").startswith(prefix)
+            ]
+            if tree:
+                folders = _nest(folders)
         return page(
-            [_slim(folder) for folder in result.get("folders", [])],
+            [_slim(folder) for folder in folders],
             truncated=bool(result.get("truncated")),
             searchedWholeTree=result.get("searched"),
         )
