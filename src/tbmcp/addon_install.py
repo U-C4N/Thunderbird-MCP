@@ -366,14 +366,15 @@ def install_automatic(
             code="WONT_CLOSE",
         )
 
-    log.info("starting Thunderbird with automation enabled")
-    _launch(exe, ["-marionette", "-remote-allow-system-access"], profile)
-    # From here on Thunderbird is ours to put back. Every exit — a Marionette that
-    # never opens, a script that answers nothing, an exception mid-way — goes
-    # through the same restart, so the command can fail without leaving the mail
-    # client closed. That happened: the add-on was installed and attached, the
-    # install script's reply was lost, and Thunderbird stayed down.
+    # From here on Thunderbird is ours to put back. Every exit — an executable that
+    # will not start, a Marionette that never opens, a script that answers nothing,
+    # an exception mid-way — goes through the same restart, so the command can fail
+    # without leaving the mail client closed. That happened once: the add-on was
+    # installed and attached, the install script's reply was lost, and Thunderbird
+    # stayed down.
     try:
+        log.info("starting Thunderbird with automation enabled")
+        _launch(exe, ["-marionette", "-remote-allow-system-access"], profile)
         return _install_over_marionette(
             exe, profile, package, identifier, restart_after=restart_after
         )
